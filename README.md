@@ -90,11 +90,66 @@ node smokeforge/dist/cli/index.js generate https://github.com/acme/myapp \
   --output ./smokeforge-output/myapp
 ```
 
-### Generate from a local path
+### Generate from a GitHub Enterprise URL (with token auth)
+
+Set your token in `smokeforge/.env` — no token in the command:
+
+```bash
+# In smokeforge/.env:
+# GITHUB_TOKEN=ghp_your_token   (or GHE_TOKEN=... as fallback)
+
+node smokeforge/dist/cli/index.js generate \
+  "https://your-ghe.company.com/owner/repo" \
+  --branch main \
+  --base-url http://localhost:8080 \
+  --output ./smokeforge-output/my-repo
+```
+
+### Generate from a local path (already cloned repo)
 
 ```bash
 node smokeforge/dist/cli/index.js generate ./my-local-repo \
   --base-url http://localhost:3001 \
+  --output ./smokeforge-output/local
+```
+
+### Generate API tests only
+
+```bash
+node smokeforge/dist/cli/index.js generate ./my-local-repo \
+  --only-api \
+  --output ./smokeforge-output/api-only
+```
+
+### Generate UI tests only
+
+```bash
+node smokeforge/dist/cli/index.js generate ./my-local-repo \
+  --only-ui \
+  --output ./smokeforge-output/ui-only
+```
+
+### Generate tests for a single domain
+
+```bash
+node smokeforge/dist/cli/index.js generate ./my-local-repo \
+  --domain auth \
+  --output ./smokeforge-output/auth-only
+```
+
+### Generate Postman collection only
+
+```bash
+node smokeforge/dist/cli/index.js generate ./my-local-repo \
+  --format postman \
+  --output ./smokeforge-output/postman-only
+```
+
+### Override framework detection
+
+```bash
+node smokeforge/dist/cli/index.js generate ./my-local-repo \
+  --framework express \
   --output ./smokeforge-output/local
 ```
 
@@ -121,12 +176,15 @@ node smokeforge/dist/cli/index.js analyze https://github.com/acme/myapp \
 
 ### `smokeforge generate <repo-url>`
 
+`<repo-url>` can be a remote URL (`https://...`) or a local path (`./my-repo`, `/absolute/path`).
+
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--output <dir>` | `-o` | `./smokeforge-output` | Directory where generated tests are written |
 | `--base-url <url>` | `-b` | `http://localhost:3000` | Target app URL injected into all generated tests |
-| `--format <formats>` | `-f` | `playwright,postman` | Comma-separated output formats. SmokeForge also **auto-selects** the best format based on what it detects (API-only → Postman; UI or full-stack → Playwright) |
-| `--framework <name>` | | _(auto-detect)_ | Override framework detection (e.g. `nextjs`, `express`, `fastify`) |
+| `--format <formats>` | `-f` | `playwright,postman` | Comma-separated output formats: `playwright`, `postman`, or both |
+| `--framework <name>` | | _(auto-detect)_ | Override framework detection (e.g. `nextjs`, `express`, `fastify`, `remix`) |
+| `--branch <name>` | | _(repo default)_ | Git branch to clone — only applies to remote URLs, ignored for local paths |
 | `--only-api` | | false | Generate API tests only (skip UI/page tests) |
 | `--only-ui` | | false | Generate UI/page tests only (skip API tests) |
 | `--domain <name>` | | _(all domains)_ | Generate tests for one domain only (e.g. `auth`, `products`) |
@@ -225,9 +283,13 @@ npm run build
 
 ## Environment Variables
 
+Set these in `smokeforge/.env` or export them before running.
+
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes (except `--dry-run`) | Anthropic API key |
+| `ANTHROPIC_API_KEY` | Yes (except `--dry-run`) | Anthropic API key for Claude |
+| `GITHUB_TOKEN` | No | GitHub / GitHub Enterprise personal access token — injected as `Authorization: token <token>` header during clone |
+| `GHE_TOKEN` | No | Fallback token if `GITHUB_TOKEN` is not set — same behavior |
 | `DEBUG` | No | Set to `true` for verbose debug logging |
 
 ---

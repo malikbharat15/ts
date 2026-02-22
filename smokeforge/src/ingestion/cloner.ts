@@ -45,7 +45,8 @@ function isLocalPath(repoUrl: string): boolean {
 
 export async function cloneRepo(
   repoUrl: string,
-  targetDir?: string
+  targetDir?: string,
+  branch?: string
 ): Promise<CloneResult> {
   // ── Local path: skip cloning, use the directory directly ──────────────────
   if (isLocalPath(repoUrl)) {
@@ -70,8 +71,22 @@ export async function cloneRepo(
   try {
     await fs.promises.mkdir(repoPath, { recursive: true });
 
+    // Read token from env — supports both GITHUB_TOKEN and GHE_TOKEN
+    const token = process.env.GITHUB_TOKEN ?? process.env.GHE_TOKEN;
+
     const git = simpleGit();
-    await git.clone(repoUrl, repoPath, ["--depth", "1"]);
+    const cloneArgs: string[] = ["--depth", "1"];
+
+    // Inject Authorization header the same way as the Python GitHubApiClient:
+    //   Authorization: token <token>
+    // Passed as -c http.extraHeader so it applies only to this clone call.
+    // Works for github.com AND GitHub Enterprise (e.g. rbcgithub.fg.rbc.com).
+    if (token) {
+      cloneArgs.unshift("-c", `http.extraHeader=Authorization: token ${token}`);
+    }
+
+    if (branch) cloneArgs.push("--branch", branch);
+    await git.clone(repoUrl, repoPath, cloneArgs);
 
     spin.succeed(`Cloned ${repoName}`);
   } catch (err) {

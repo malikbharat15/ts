@@ -1,0 +1,9 @@
+{
+  "name": "test-saml-app",
+  "version": "1.0.0",
+  "dependencies": {
+    "express": "^4.18.0",
+    "passport": "^0.6.0",
+    "passport-saml": "^3.2.4"
+  }
+}

@@ -43,6 +43,7 @@ program
     "--dry-run",
     "Analyze repo and dump chunks without calling the LLM (no API key needed)"
   )
+  .option("--branch <name>", "Git branch to clone (default: repo default branch)")
   .action(generateCommand);
 
 // ─── analyze command ──────────────────────────────────────────────────────────

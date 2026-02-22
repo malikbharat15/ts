@@ -41,6 +41,7 @@ export interface GenerateOptions {
   verbose?: boolean;
   install?: boolean;
   dryRun?: boolean;
+  branch?: string;
 }
 
 // ─── Retry helpers ────────────────────────────────────────────────────────────
@@ -200,7 +201,7 @@ export async function generateCommand(
   const cloneSpinner = spinner(`Cloning ${repoUrl}...`);
   let cloneResult: Awaited<ReturnType<typeof cloneRepo>>;
   try {
-    cloneResult = await cloneRepo(repoUrl);
+    cloneResult = await cloneRepo(repoUrl, undefined, options.branch);
     cloneSpinner.succeed(`Cloned → ${cloneResult.repoPath}`);
   } catch (err) {
     cloneSpinner.fail(`Clone failed: ${(err as Error).message}`);

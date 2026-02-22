@@ -1,0 +1,12 @@
+{
+  "$schema": "./dist/smokeforge.schema.json",
+  "outputDir": "./tests",
+  "playwright": {
+    "enabled": true,
+    "outputFile": "smoke.spec.ts"
+  },
+  "postman": {
+    "enabled": true,
+    "outputFile": "smoke-collection.json"
+  }
+}

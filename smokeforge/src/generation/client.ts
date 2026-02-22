@@ -2,6 +2,47 @@ import Anthropic from "@anthropic-ai/sdk";
 import * as fs from "fs";
 import * as path from "path";
 
+// =============================================================================
+// LLM CLIENT — HOW TO SWAP FOR YOUR COMPANY PROXY
+// =============================================================================
+//
+// Currently this file uses the Anthropic SDK directly.
+// Your company uses a proxy LLM client (Python pattern: llm = LLMClient()).
+//
+// WHAT YOU NEED TO DO:
+//
+// 1. Install your company's Node/TypeScript LLM client package, e.g.:
+//      npm install @your-company/llm-client
+//
+// 2. In this file, replace the `getClient()` function and the
+//    `client.messages.create(...)` call inside `generateWithRetry`.
+//    Both are clearly marked with  ◄ SWAP HERE  comments below.
+//
+// 3. Your company client likely exposes one of these patterns:
+//
+//    PATTERN A — invoke() method (LangChain-style, matches your Python code):
+//      const llm = new LLMClient();
+//      const response = await llm.invoke(systemPrompt + "\n\n" + userMessage);
+//      return response.content;   // or response.text, response.choices[0].text etc.
+//
+//    PATTERN B — chat() / complete() method:
+//      const llm = new LLMClient({ model: "claude-sonnet-4-6" });
+//      const response = await llm.chat([
+//        { role: "system", content: systemPrompt },
+//        { role: "user",   content: userMessage  },
+//      ]);
+//      return response.content;
+//
+//    PATTERN C — OpenAI-compatible proxy (most common for enterprise):
+//      import OpenAI from "openai";
+//      const client = new OpenAI({ baseURL: process.env.COMPANY_LLM_URL, apiKey: process.env.LLM_TOKEN });
+//      const res = await client.chat.completions.create({ model: "claude-sonnet-4-6", messages: [...] });
+//      return res.choices[0].message.content ?? "";
+//
+// 4. Add the required env vars (token, base URL etc.) to smokeforge/.env
+//
+// =============================================================================
+
 // MODEL: always claude-sonnet-4-6 — hardcoded, not configurable
 // DO NOT change this — fixes the model for reproducibility
 const MODEL = "claude-sonnet-4-6";
@@ -14,6 +55,18 @@ type CachedTextBlock = Anthropic.TextBlockParam & {
   cache_control?: { type: "ephemeral" };
 };
 
+// ◄ SWAP HERE ─────────────────────────────────────────────────────────────────
+// Replace this function with your company LLM client initialisation.
+// The function must return something that can make LLM calls.
+//
+// COMPANY PROXY EXAMPLE:
+//   import { LLMClient } from "@your-company/llm-client";
+//   function getClient() {
+//     const token = process.env["LLM_TOKEN"];
+//     if (!token) throw new Error("LLM_TOKEN is not set");
+//     return new LLMClient({ token, model: MODEL });
+//   }
+// ─────────────────────────────────────────────────────────────────────────────
 function getClient(): Anthropic {
   const apiKey = process.env["ANTHROPIC_API_KEY"];
   if (!apiKey) {
@@ -125,14 +178,41 @@ export async function generateWithRetry(
       if (attempt === 0) {
         writeDebugLog(systemPrompt, userMessage);
       }
-      // Build a cached system block. The cast is required because SDK ^0.24.0
-      // types do not expose cache_control on TextBlockParam, but the API supports it.
+
+      // ◄ SWAP HERE ───────────────────────────────────────────────────────────
+      // This block calls the Anthropic API directly.
+      // Replace it with your company proxy client call.
+      //
+      // PATTERN A — invoke() (LangChain-style, mirrors your Python LLMClient):
+      //   const response = await client.invoke(systemPrompt + "\n\n" + userMessage);
+      //   return response.content;  // adjust property name to match your client
+      //
+      // PATTERN B — chat() with message array:
+      //   const response = await client.chat([
+      //     { role: "system", content: systemPrompt },
+      //     { role: "user",   content: userMessage  },
+      //   ]);
+      //   return response.content;
+      //
+      // PATTERN C — OpenAI-compatible proxy:
+      //   const res = await client.chat.completions.create({
+      //     model: MODEL,
+      //     max_tokens: 8192,
+      //     temperature: 0.1,
+      //     messages: [
+      //       { role: "system", content: systemPrompt },
+      //       { role: "user",   content: userMessage  },
+      //     ],
+      //   });
+      //   return res.choices[0].message.content ?? "";
+      // ───────────────────────────────────────────────────────────────────────
+
+      // CURRENT: Anthropic SDK direct call — comment this out when switching
       const systemBlock: CachedTextBlock = {
         type: "text",
         text: systemPrompt,
         cache_control: { type: "ephemeral" },
       };
-
       const message = await client.messages.create({
         model: MODEL,
         max_tokens: 8192,
@@ -140,12 +220,13 @@ export async function generateWithRetry(
         system: [systemBlock as unknown as Anthropic.TextBlockParam],
         messages: [{ role: "user", content: userMessage }],
       });
-
       const content = message.content[0];
       if (content.type !== "text") {
         throw new Error("Non-text response received from Anthropic API");
       }
       return content.text;
+      // ◄ END SWAP ────────────────────────────────────────────────────────────
+
     } catch (err) {
       lastError = err as Error;
       if (attempt < maxRetries) {
