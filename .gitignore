@@ -36,3 +36,6 @@ smokeforge/coverage/
 
 # ─── Temp files from SmokeForge runs ─────────────────────────────────────────
 /tmp/smokeforge-*
+
+
+tmp-val-test-*/*
