@@ -1,0 +1,38 @@
+# ─── Generated test output ────────────────────────────────────────────────────
+smokeforge-output/
+
+# ─── Enterprise sample repos (local test inputs) ──────────────────────────────
+enterprise-repos/
+
+# ─── Uploads ──────────────────────────────────────────────────────────────────
+uploads/
+
+# ─── Node ─────────────────────────────────────────────────────────────────────
+node_modules/
+smokeforge/node_modules/
+
+# ─── Build artifacts ──────────────────────────────────────────────────────────
+smokeforge/dist/
+
+# ─── Environment & secrets ────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+smokeforge/.env
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+
+# ─── OS / Editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+*.swp
+
+# ─── Test coverage ────────────────────────────────────────────────────────────
+coverage/
+smokeforge/coverage/
+
+# ─── Temp files from SmokeForge runs ─────────────────────────────────────────
+/tmp/smokeforge-*

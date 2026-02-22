@@ -1,0 +1,40 @@
+{
+  "name": "smokeforge",
+  "version": "1.0.0",
+  "bin": {
+    "smokeforge": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/cli/index.ts",
+    "start": "node dist/cli/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest watch test/unit",
+    "test:unit": "vitest run test/unit",
+    "test:coverage": "vitest run --coverage",
+    "test:ui": "vitest run test/unit/analysis/ui",
+    "test:backend": "vitest run test/unit/analysis/backend"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.24.0",
+    "@typescript-eslint/typescript-estree": "^7.0.0",
+    "ajv": "^8.16.0",
+    "chalk": "^4.1.2",
+    "commander": "^12.0.0",
+    "cosmiconfig": "^9.0.0",
+    "dotenv": "^17.3.1",
+    "glob": "^10.0.0",
+    "ora": "^5.4.1",
+    "simple-git": "^3.24.0",
+    "typescript": "^5.4.0",
+    "zod": "^3.23.0",
+    "zod-to-json-schema": "^3.23.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^20.0.0",
+    "@vitest/coverage-v8": "^4.0.18",
+    "ts-node": "^10.9.0",
+    "vitest": "^1.6.0"
+  }
+}
