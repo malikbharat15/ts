@@ -10,9 +10,42 @@ smokeforge generate https://github.com/acme/myapp --base-url http://localhost:30
 
 ---
 
+## Generated Test Quality (Enterprise App Suite — v2)
+
+All 7 enterprise apps were analysed and generated with the 31-rule system prompt and the LLM criticality ranker active (Feb 2026).
+
+| App | Framework | Format | Files | Tests / Requests | Confidence | Notes |
+|-----|-----------|--------|-------|-----------------|------------|-------|
+| `enterprise-remix-healthcare` | Remix + session auth | Playwright | 8 | 20 tests | **90%** | Full auth flow, semantic locators, redirect guards throughout |
+| `enterprise-react-vite-crm` | React + Vite (no auth) | Playwright | 6 | ~24 tests | **88%** | Stat-card headings via `getByRole` (no CSS class guessing); all pages redirect-guarded |
+| `enterprise-express-hr` | Express + Bearer JWT | Postman | — | 30 requests | **86%** | Pre-request Bearer scripts, multi-property OR shape checks, strong endpoint coverage |
+| `enterprise-remix-ecommerce` | Remix (no auth) | Playwright | 8 | ~28 tests | **85%** | Checkout / orders / cart all redirect-guarded; `register.page` password field self-annotated `⚠️ BRITTLE` |
+| `enterprise-fastify-inventory` | Fastify + Bearer JWT | Postman | — | 16 requests | **84%** | Clean Bearer auth; fewer distinct routes than Express HR |
+| `enterprise-nextjs-saas` | Next.js + NextAuth | Playwright | 7 | 19 tests | **81%** | NextAuth session flow handled; some heading `name` values are LLM-inferred against actual source |
+| `enterprise-remix-fintech` | Remix (no auth) | Playwright | 8 | 29 tests | **73%** | Structurally correct; fintech section headings inferred — highest re-run risk if source headings differ |
+
+> Scores reflect: locator resilience, auth-gating correctness, API shape resilience, redirect guard presence, and absence of guessed CSS class selectors.
+
+---
+
+## System Prompt Quality Rules (31 active rules)
+
+The generation system prompt (`smokeforge/src/generation/prompts/playwright.system.ts`) enforces 31 rules. Key defensive rules added during the enterprise app suite validation:
+
+| Rule | Description |
+|------|-------------|
+| **26** | Login form uses `getByLabel` → `getByPlaceholder` → `input[type=password]` fallback chain |
+| **27** | Auth button matched with `/login\|sign in\|log in\|submit/i` regex — consistent across all files |
+| **28** | No conditional / progressive UI assertions on page load |
+| **29** | API response shape: multi-property OR check — never assume a single top-level key |
+| **30** | CSS class selector fallback prohibition — never guess `.stats-grid`, `.stat-card` etc.; use `getByRole('heading')` or `getByRole('main')` instead |
+| **31** | Auth-gated redirect guard — after `page.goto()`, check `page.url()` for `/login\|auth\|signin\|sign-in/`, return early if redirected |
+
+---
+
 ## How It Works
 
-SmokeForge runs a 13-step pipeline:
+SmokeForge runs a 14-step pipeline:
 
 | Step | What happens |
 |------|-------------|
@@ -22,13 +55,14 @@ SmokeForge runs a 13-step pipeline:
 | **4** | Parse all `.ts/.tsx/.js/.jsx` files into ASTs, extract API endpoints + UI pages |
 | **5** | Detect authentication patterns (JWT, NextAuth, session cookies…) |
 | **6** | Build a typed **Test Blueprint JSON** — the LLM's source of truth |
-| **7** | Chunk the blueprint by domain (1 LLM call per chunk) |
-| **8** | Call Claude (Anthropic) to generate spec files, with up to 2 validation retries per chunk |
-| **9** | Write Playwright spec files + `playwright.config.ts` |
-| **10** | Write merged Postman collection + environment JSON |
-| **11** | Write `smokeforge-report.json` (confidence scores, coverage, warnings) |
-| **12** | Print summary |
-| **13** | Delete the cloned temp directory |
+| **7** | **LLM criticality ranker** — Claude scores each endpoint/page by smoke test value; top-ranked surfaces are prioritised |
+| **8** | Chunk the blueprint by domain (1 LLM call per chunk) |
+| **9** | Call Claude (Anthropic) to generate spec files, with up to 2 validation retries per chunk |
+| **10** | Write Playwright spec files + `playwright.config.ts` |
+| **11** | Write merged Postman collection + environment JSON |
+| **12** | Write `smokeforge-report.json` (confidence scores, coverage, warnings) |
+| **13** | Print summary |
+| **14** | Delete the cloned temp directory |
 
 > **Where is the Git step?**  
 > Step 2 — `cloner.ts` calls `simpleGit().clone(url, tempDir, ['--depth', '1'])`.  

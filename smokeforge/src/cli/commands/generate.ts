@@ -16,6 +16,7 @@ import type { ExtractedEndpoint, ExtractedPage } from "../../blueprint/types";
 import { buildBlueprint } from "../../blueprint/builder";
 import { chunkBlueprint } from "../../blueprint/chunker";
 import type { BlueprintChunk } from "../../blueprint/chunker";
+import { rankCriticalSurfaces } from "../../blueprint/criticality-ranker";
 import { generateWithRetry } from "../../generation/client";
 import { PLAYWRIGHT_SYSTEM_PROMPT } from "../../generation/prompts/playwright.system";
 import { POSTMAN_SYSTEM_PROMPT } from "../../generation/prompts/postman.system";
@@ -186,7 +187,7 @@ export async function generateCommand(
   console.log();
 
   // ── Step 1: Validate API key — skipped in dry-run mode ──────────────────────
-  step(1, 13, "Checking API key");
+  step(1, 14, "Checking API key");
   if (!options.dryRun && !process.env["ANTHROPIC_API_KEY"]) {
     logError(
       "ANTHROPIC_API_KEY is not set. Export it before running smokeforge."
@@ -197,7 +198,7 @@ export async function generateCommand(
   else detail("Skipped (dry-run mode)");
 
   // ── Step 2: Clone repo ───────────────────────────────────────────────────────
-  step(2, 13, "Cloning repository");
+  step(2, 14, "Cloning repository");
   const cloneSpinner = spinner(`Cloning ${repoUrl}...`);
   let cloneResult: Awaited<ReturnType<typeof cloneRepo>>;
   try {
@@ -212,7 +213,7 @@ export async function generateCommand(
 
   try {
     // ── Step 3: Detect frameworks ──────────────────────────────────────────────
-    step(3, 13, "Detecting frameworks");
+    step(3, 14, "Detecting frameworks");
     const detectSpinner = spinner("Scanning package.json...");
     const detection = await detect(repoPath);
     const primary = detection.packages[0];
@@ -227,7 +228,7 @@ export async function generateCommand(
       detail(`Auth libs   : ${primary.authLibraries.join(", ")}`);
 
     // ── Step 4: Parse + extract ────────────────────────────────────────────────
-    step(4, 13, "Parsing source files");
+    step(4, 14, "Parsing source files");
     const parseSpinner = spinner("Parsing ASTs...");
     const allFiles = getAllFiles(repoPath, ANALYZABLE_EXTENSIONS);
     const parsedFiles = allFiles
@@ -237,13 +238,13 @@ export async function generateCommand(
     if (allFiles.length - parsedFiles.length > 0)
       detail(`Skipped ${allFiles.length - parsedFiles.length} unparseable files`);
 
-    step(4, 13, "Extracting API endpoints");
+    step(4, 14, "Extracting API endpoints");
     const extractSpinner = spinner("Running backend extractors...");
     const endpoints = await runExtractors(parsedFiles, detection);
     extractSpinner.succeed(`Found ${endpoints.length} endpoints`);
 
     // ── Step 4b: Extract UI pages ─────────────────────────────────────────────
-    step(4, 13, "Extracting UI pages");
+    step(4, 14, "Extracting UI pages");
     const uiSpinner = spinner("Running UI extractors...");
     const routerPages = extractPages(parsedFiles, detection, repoPath);
     const reactPages = extractReactLocators(parsedFiles);
@@ -298,7 +299,7 @@ export async function generateCommand(
     uiSpinner.succeed(`Found ${allPages.length} pages`);
 
     // ── Step 5: Auth detection ────────────────────────────────────────────────
-    step(5, 13, "Detecting authentication");
+    step(5, 14, "Detecting authentication");
     const authSpinner = spinner("Scanning auth patterns...");
     const auth = await detectAuth(parsedFiles, endpoints, repoPath);
     if (auth) {
@@ -312,7 +313,7 @@ export async function generateCommand(
     }
 
     // ── Step 6: Harvest configs + build blueprint ─────────────────────────────
-    step(6, 13, "Building test blueprint");
+    step(6, 14, "Building test blueprint");
     const blueprintSpinner = spinner("Assembling blueprint...");
     const configs = await harvestConfigs(repoPath);
     const blueprint = buildBlueprint(
@@ -333,6 +334,57 @@ export async function generateCommand(
     fs.writeFileSync(blueprintPath, JSON.stringify(blueprint, null, 2), "utf-8");
     detail(`Blueprint JSON → ${blueprintPath}`);
 
+    // ── Step 7: Rank critical smoke-test surfaces ─────────────────────────────
+    step(7, 14, "Ranking critical smoke targets");
+    const rankerSpinner = spinner("LLM prioritising critical surfaces...");
+    let rankerResult: Awaited<ReturnType<typeof rankCriticalSurfaces>>;
+    try {
+      rankerResult = await rankCriticalSurfaces(
+        blueprint.endpoints,
+        blueprint.pages,
+        blueprint.auth,
+        options.output,
+        !!options.dryRun
+      );
+      rankerSpinner.succeed(
+        `Ranker complete — ${rankerResult.endpoints.length} API endpoints + ${rankerResult.pages.length} UI pages selected  (app type: ${rankerResult.appType})`
+      );
+    } catch (rankerErr) {
+      rankerSpinner.fail(`Ranker failed: ${(rankerErr as Error).message}`);
+      throw rankerErr;
+    }
+
+    // ── Print what was sent to LLM and what it selected ──────────────────────
+    console.log();
+    info("━━━ RANKER: WHAT WAS SENT TO LLM ━━━");
+    info(`  App type detected: ${rankerResult.appType}`);
+    info(`  Input surface (${blueprint.endpoints.length} endpoints + ${blueprint.pages.length} pages):`);
+    for (const ep of blueprint.endpoints) {
+      detail(`    ${ep.authRequired ? "🔒" : "🔓"} API  ${ep.method.padEnd(6)} ${ep.path}`);
+    }
+    for (const pg of blueprint.pages) {
+      detail(`    ${pg.authRequired ? "🔒" : "🔓"} PAGE ${pg.route}  (${pg.title})`);
+    }
+    console.log();
+    info(`━━━ RANKER: LLM SELECTION (${rankerResult.rankedSurfaces.length} surfaces selected) ━━━`);
+    for (const r of rankerResult.rankedSurfaces.sort((a, b) => a.rank - b.rank)) {
+      const surface = r.type === "api"
+        ? `API  ${(r.method ?? "").padEnd(6)} ${r.path ?? ""}`
+        : `PAGE ${r.route ?? ""} (${r.title ?? ""})`;
+      info(`  [${r.rank}] ${r.authRequired ? "🔒" : "🔓"} ${surface}`);
+      detail(`        ↳ ${r.reason}`);
+    }
+    console.log();
+    info(`  ✔ Debug written → ${path.join(options.output, "llm-debug", "ranker-debug.json")}`);
+    info(`  ✔ Markdown  → ${path.join(options.output, "llm-debug", "ranker-debug.md")}`);
+
+    // Build a ranked blueprint for downstream chunking
+    const rankedBlueprint = {
+      ...blueprint,
+      endpoints: rankerResult.endpoints,
+      pages:     rankerResult.pages,
+    };
+
     // ── Step 6c: Auto-select output formats based on what was detected ────────
     // Only apply auto-selection when the user has NOT passed explicit --only-* flags
     // and is using the default format string (both formats requested).
@@ -340,8 +392,8 @@ export async function generateCommand(
       (formats.length === 1); // single explicit format passed
 
     if (!userExplicitFormat) {
-      const hasUI  = blueprint.pages.length > 0;
-      const hasAPI = blueprint.endpoints.length > 0;
+      const hasUI  = rankedBlueprint.pages.length > 0;
+      const hasAPI = rankedBlueprint.endpoints.length > 0;
 
       if (hasAPI && !hasUI) {
         doPlaywright = false;
@@ -362,9 +414,9 @@ export async function generateCommand(
       }
     }
 
-    // ── Step 7: Chunk blueprint ───────────────────────────────────────────────
-    step(7, 13, "Chunking blueprint");
-    let chunks = chunkBlueprint(blueprint);
+    // ── Step 8: Chunk ranked blueprint ────────────────────────────────────────
+    step(8, 14, "Chunking ranked blueprint");
+    let chunks = chunkBlueprint(rankedBlueprint);
     if (options.domain) {
       chunks = chunks.filter((c) => c.domain === options.domain);
       detail(`Filtered to domain: ${options.domain}`);
@@ -374,7 +426,7 @@ export async function generateCommand(
       detail(`  chunk ${String(i+1).padStart(2,'0')}  ${c.domain}  →  ${c.outputFileName}  (${c.endpoints.length} ep, ${c.pages.length} pg)`)
     );
 
-    // ── Step 7b: Pre-dump ALL chunks before any LLM calls ────────────────────
+    // ── Step 8b: Pre-dump ALL chunks before any LLM calls ────────────────────
     await ensureDir(options.output);
     const chunksDir = path.join(options.output, "chunks");
     await ensureDir(chunksDir);
@@ -390,7 +442,7 @@ export async function generateCommand(
         hasPages: chunk.hasPages,
         endpointCount: chunk.endpoints.length,
         pageCount: chunk.pages.length,
-        llmUserMessage: buildPlaywrightUserMessage(chunk, blueprint.endpoints),
+        llmUserMessage: buildPlaywrightUserMessage(chunk, rankedBlueprint.endpoints),
         chunk,
       };
       fs.writeFileSync(chunkDumpPath, JSON.stringify(chunkDump, null, 2), "utf-8");
@@ -481,8 +533,8 @@ export async function generateCommand(
       return;
     }
 
-    // ── Step 8: Generate per chunk — sequential ───────────────────────────────
-    step(8, 13, `Generating tests  (${chunks.length} LLM calls)`);
+    // ── Step 9: Generate per chunk — sequential ───────────────────────────────
+    step(9, 14, `Generating tests  (${chunks.length} LLM calls)`);
     const tempDir = path.join(os.tmpdir(), `smokeforge-validate-${Date.now()}`);
     await ensureDir(tempDir);
 
@@ -513,7 +565,7 @@ export async function generateCommand(
 
       // (a) Playwright
       if (doPlaywright) {
-        const code = await generatePlaywrightWithRetry(chunk, tempDir, blueprint.endpoints);
+        const code = await generatePlaywrightWithRetry(chunk, tempDir, rankedBlueprint.endpoints);
         playwrightSpecs.push({ chunk, code });
       }
 
@@ -535,47 +587,47 @@ export async function generateCommand(
       // ignore
     }
 
-    // ── Step 9: Write Playwright output ───────────────────────────────────────
+    // ── Step 10: Write Playwright output ──────────────────────────────────────
     if (doPlaywright && playwrightSpecs.length > 0) {
-      step(9, 13, "Writing Playwright output");
+      step(10, 14, "Writing Playwright output");
       const writeSpinner = spinner("Writing spec files...");
       await writePlaywrightOutput(chunks, playwrightSpecs, options.output, auth, options.baseUrl);
       writeSpinner.succeed(`${playwrightSpecs.length} spec files written`);
       detail(`→ ${path.join(options.output, "playwright", "smoke")}`);
     }
 
-    // ── Step 10: Write Postman output ─────────────────────────────────────────
+    // ── Step 11: Write Postman output ─────────────────────────────────────────
     if (doPostman && postmanCollections.length > 0) {
-      step(10, 13, "Writing Postman output");
+      step(11, 14, "Writing Postman output");
       const writeSpinner = spinner("Writing collection...");
       await writePostmanOutput(postmanCollections, options.output, auth, options.baseUrl);
       writeSpinner.succeed("Postman collection written");
       detail(`→ ${path.join(options.output, "postman")}`);
     }
 
-    // ── Step 11: Generate report ──────────────────────────────────────────────
-    step(11, 13, "Generating report");
+    // ── Step 12: Generate report ─────────────────────────────────────────────
+    step(12, 14, "Generating report");
     const reportSpinner = spinner("Writing smokeforge-report.json...");
-    const report = await generateReport(blueprint, options.output);
+    const report = await generateReport(rankedBlueprint, options.output);
     reportSpinner.succeed("Report written");
 
-    // ── Step 12: Print summary ────────────────────────────────────────────────
+    // ── Step 13: Print summary ───────────────────────────────────────────────
     const lowConfidenceCount =
       report.summary.lowConfidence + report.summary.todos;
 
     printSummary(
       repoName,
       frameworkNames,
-      blueprint.endpoints.length,
-      blueprint.pages.length,
+      rankedBlueprint.endpoints.length,
+      rankedBlueprint.pages.length,
       playwrightSpecs.length,
       postmanCollections.length,
       lowConfidenceCount,
       options.output
     );
   } finally {
-    // ── Step 13: Cleanup cloned repo ──────────────────────────────────────────
-    step(13, 13, "Cleaning up");
+    // ── Step 14: Cleanup cloned repo ──────────────────────────────────────────
+    step(14, 14, "Cleaning up");
     const cleanSpinner = spinner("Removing cloned repo from temp dir...");
     await cleanup();
     cleanSpinner.succeed("Temp files removed");
