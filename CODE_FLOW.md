@@ -225,12 +225,24 @@ generate.ts
 generate.ts
   └─► extractPages(parsedFiles, detection, repoPath)      ← router-extractor.ts
         └─► detects router type:
-              remix detected → walks app/routes/ directory
-              maps file paths to URL routes:
-                app/routes/_index.tsx           → /
-                app/routes/appointments._index.tsx → /appointments
-                app/routes/appointments.$id.tsx    → /appointments/:id
-                app/routes/login.tsx               → /login
+              remix detected → calls extractRemixPages(repoPath)
+                walks app/routes/ (or routes/) directory
+                calls remixFileToRoute(relPath) on each file:
+
+                V2 flat dot-notation (basename has dots):
+                  app/routes/_index.tsx                    → /
+                  app/routes/appointments._index.tsx       → /appointments
+                  app/routes/appointments.$id.tsx          → /appointments/:id
+                  app/routes/api.mainframe.branches.ts     → /api/mainframe/branches
+                  app/routes/_auth.login.tsx               → /login  (_auth pathless prefix stripped)
+                  app/routes/(admin).users.tsx             → /users  ((admin) group stripped)
+
+                V1 folder-based (relPath has directory separators):
+                  app/routes/appointments/index.tsx        → /appointments
+                  app/routes/appointments/$id.tsx          → /appointments/:id
+                  app/routes/_auth/login.tsx               → /login
+
+                all Remix pages emitted at confidence: 0.88
 
               scans each route file's AST for:
               ├─ JSX elements → <h1>, <button>, <input>, <form>
@@ -686,7 +698,7 @@ generate.ts  (finally block — always runs even on error)
 | `analysis/backend/remix.extractor.ts` | Walks AST nodes for Remix `loader()`/`action()` exports → endpoints |
 | `analysis/backend/express.extractor.ts` | Walks AST for `app.get()`, `router.post()` etc. → endpoints |
 | `analysis/backend/fastify.extractor.ts` | Walks AST for `fastify.route({})` and `.get/.post` shorthand |
-| `analysis/ui/router-extractor.ts` | Maps file paths in `app/routes/` or `pages/` dirs → URL routes + locators |
+| `analysis/ui/router-extractor.ts` | Maps file paths → URL routes + locators. `remixFileToRoute()` handles Remix v2 flat dot-notation and v1 folder-based. `extractRemixPages()` walks `app/routes/`. Also handles Next.js Pages/App Router, React Router (JSX + `createBrowserRouter`), TanStack Router, Vue Router, Angular, Nuxt |
 | `analysis/ui/react.extractor.ts` | Scans JSX nodes for `role=`, `aria-label=`, `placeholder=` → locators |
 | `analysis/auth/auth-detector.ts` | Identifies auth type, login endpoint, credential fields, seed values |
 | `blueprint/builder.ts` | Assembles all extracted data into a single `TestBlueprint` JSON |

@@ -22,9 +22,10 @@ All 7 enterprise apps were analysed and generated with the 31-rule system prompt
 | `enterprise-remix-ecommerce` | Remix (no auth) | Playwright | 8 | ~28 tests | **85%** | Checkout / orders / cart all redirect-guarded; `register.page` password field self-annotated `⚠️ BRITTLE` |
 | `enterprise-fastify-inventory` | Fastify + Bearer JWT | Postman | — | 16 requests | **84%** | Clean Bearer auth; fewer distinct routes than Express HR |
 | `enterprise-nextjs-saas` | Next.js + NextAuth | Playwright | 7 | 19 tests | **81%** | NextAuth session flow handled; some heading `name` values are LLM-inferred against actual source |
-| `enterprise-remix-fintech` | Remix (no auth) | Playwright | 8 | 29 tests | **73%** | Structurally correct; fintech section headings inferred — highest re-run risk if source headings differ |
+| `enterprise-remix-fintech` | Remix v2 dot-notation (no auth) | Playwright | 7 | 55 tests | **82%** | Re-generated with Remix v2 extractor; headings now sourced from JSX (`Financial Dashboard`, `Net Worth` etc.) — no longer inferred; dashboard test count 5→16 |
 
 > Scores reflect: locator resilience, auth-gating correctness, API shape resilience, redirect guard presence, and absence of guessed CSS class selectors.
+> `enterprise-remix-fintech` was re-generated after adding Remix v2 dot-notation route extraction (`remixFileToRoute`). Pages found: 9→15, confidence: 0.70→0.88, total tests: 47→55.
 
 ---
 

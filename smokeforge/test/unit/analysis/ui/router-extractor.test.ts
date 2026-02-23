@@ -1,8 +1,8 @@
 // test/unit/analysis/ui/router-extractor.test.ts
 import { describe, it, expect } from 'vitest';
-import { extractPages } from '../../../../src/analysis/ui/router-extractor';
+import { extractPages, remixFileToRoute } from '../../../../src/analysis/ui/router-extractor';
 import type { DetectionResult } from '../../../../src/ingestion/detector';
-import { createFixtureFiles } from '../../../helpers/fixture-helpers';
+import { createFixtureFiles, createFixtureFilesWithDir } from '../../../helpers/fixture-helpers';
 
 function makeDetection(overrides: Partial<{
   frontendFrameworks: string[];
@@ -187,5 +187,161 @@ describe('extractPages — edge cases', () => {
     });
     const pages = extractPages(files, detection, '/test');
     expect(Array.isArray(pages)).toBe(true);
+  });
+});
+
+// ─── remixFileToRoute — unit tests (pure conversion, no filesystem) ────────────
+
+describe('remixFileToRoute — Remix v2 flat dot-notation', () => {
+  it('bare _index.tsx → /', () => {
+    expect(remixFileToRoute('_index.tsx')).toBe('/');
+  });
+
+  it('bare index.tsx → /', () => {
+    expect(remixFileToRoute('index.tsx')).toBe('/');
+  });
+
+  it('login.tsx → /login', () => {
+    expect(remixFileToRoute('login.tsx')).toBe('/login');
+  });
+
+  it('appointments._index.tsx → /appointments', () => {
+    expect(remixFileToRoute('appointments._index.tsx')).toBe('/appointments');
+  });
+
+  it('appointments.$appointmentId.tsx → /appointments/:appointmentId', () => {
+    expect(remixFileToRoute('appointments.$appointmentId.tsx')).toBe('/appointments/:appointmentId');
+  });
+
+  it('api.mainframe.branches.ts → /api/mainframe/branches', () => {
+    expect(remixFileToRoute('api.mainframe.branches.ts')).toBe('/api/mainframe/branches');
+  });
+
+  it('api.mainframe.racf-id.ts → /api/mainframe/racf-id', () => {
+    expect(remixFileToRoute('api.mainframe.racf-id.ts')).toBe('/api/mainframe/racf-id');
+  });
+
+  it('jenkins.deploy-summary.$applicationId.tsx → /jenkins/deploy-summary/:applicationId', () => {
+    expect(remixFileToRoute('jenkins.deploy-summary.$applicationId.tsx'))
+      .toBe('/jenkins/deploy-summary/:applicationId');
+  });
+
+  it('jenkins.deploy-summary.$applicationId.request.tsx → /jenkins/deploy-summary/:applicationId/request', () => {
+    expect(remixFileToRoute('jenkins.deploy-summary.$applicationId.request.tsx'))
+      .toBe('/jenkins/deploy-summary/:applicationId/request');
+  });
+
+  it('workflow-summaries.$appCode.$repo.tsx → /workflow-summaries/:appCode/:repo', () => {
+    expect(remixFileToRoute('workflow-summaries.$appCode.$repo.tsx'))
+      .toBe('/workflow-summaries/:appCode/:repo');
+  });
+
+  it('developer-productivity.tsx → /developer-productivity', () => {
+    expect(remixFileToRoute('developer-productivity.tsx')).toBe('/developer-productivity');
+  });
+
+  it('_auth.login.tsx → /login  (pathless layout prefix stripped)', () => {
+    expect(remixFileToRoute('_auth.login.tsx')).toBe('/login');
+  });
+
+  it('api.session.refresh.ts → /api/session/refresh', () => {
+    expect(remixFileToRoute('api.session.refresh.ts')).toBe('/api/session/refresh');
+  });
+});
+
+describe('remixFileToRoute — Remix v1 folder-based', () => {
+  it('appointments/index.tsx → /appointments', () => {
+    expect(remixFileToRoute('appointments/index.tsx')).toBe('/appointments');
+  });
+
+  it('appointments/$id.tsx → /appointments/:id', () => {
+    expect(remixFileToRoute('appointments/$id.tsx')).toBe('/appointments/:id');
+  });
+
+  it('api/mainframe/branches.ts → /api/mainframe/branches', () => {
+    expect(remixFileToRoute('api/mainframe/branches.ts')).toBe('/api/mainframe/branches');
+  });
+
+  it('$id/_index.tsx → /:id', () => {
+    expect(remixFileToRoute('$id/_index.tsx')).toBe('/:id');
+  });
+
+  it('_auth/login.tsx → /login  (pathless layout prefix stripped)', () => {
+    expect(remixFileToRoute('_auth/login.tsx')).toBe('/login');
+  });
+});
+
+// ─── extractPages — Remix integration (real filesystem) ───────────────────────
+
+function makeRemixDetection(): DetectionResult {
+  return {
+    monorepo: false,
+    monorepoTool: 'none',
+    packages: [{
+      rootPath: '/test',
+      name: 'test',
+      backendFrameworks: ['remix'] as never[],
+      frontendFrameworks: ['react-spa'] as never[],
+      routerLibraries: ['react-router-dom'] as never[],
+      schemaLibraries: [] as never[],
+      authLibraries: [] as never[],
+      isFullStack: false,
+      nodeVersion: null,
+      hasTypeScript: true,
+      packageJson: {},
+    }],
+  };
+}
+
+describe('extractPages — Remix v2 dot-notation (filesystem integration)', () => {
+  it('extracts routes from dot-notation flat route files', () => {
+    const { parsedFiles, tmpDir } = createFixtureFilesWithDir({
+      'app/routes/_index.tsx': `export default function Index() { return <div>Home</div>; }`,
+      'app/routes/login.tsx': `export default function Login() { return <div>Login</div>; }`,
+      'app/routes/appointments._index.tsx': `export default function Appointments() { return <div />; }`,
+      'app/routes/appointments.$id.tsx': `export default function Appointment() { return <div />; }`,
+      'app/routes/api.mainframe.branches.ts': `export async function loader() { return []; }`,
+      'app/routes/jenkins.deploy-summary.$applicationId.tsx': `export default function Deploy() { return <div />; }`,
+    });
+
+    const detection = makeRemixDetection();
+    const pages = extractPages(parsedFiles, detection, tmpDir);
+
+    expect(pages.find(p => p.route === '/')).toBeDefined();
+    expect(pages.find(p => p.route === '/login')).toBeDefined();
+    expect(pages.find(p => p.route === '/appointments')).toBeDefined();
+    expect(pages.find(p => p.route === '/appointments/:id')).toBeDefined();
+    expect(pages.find(p => p.route === '/api/mainframe/branches')).toBeDefined();
+    expect(pages.find(p => p.route === '/jenkins/deploy-summary/:applicationId')).toBeDefined();
+  });
+
+  it('deduplicates routes from v2 dot-notation', () => {
+    const { parsedFiles, tmpDir } = createFixtureFilesWithDir({
+      'app/routes/login.tsx': `export default function Login() { return <div />; }`,
+    });
+    const detection = makeRemixDetection();
+    const pages = extractPages(parsedFiles, detection, tmpDir);
+    const loginPages = pages.filter(p => p.route === '/login');
+    expect(loginPages.length).toBe(1);
+  });
+});
+
+describe('extractPages — Remix v1 folder-based (filesystem integration)', () => {
+  it('extracts routes from v1 folder structure', () => {
+    const { parsedFiles, tmpDir } = createFixtureFilesWithDir({
+      'app/routes/index.tsx': `export default function Home() { return <div />; }`,
+      'app/routes/login.tsx': `export default function Login() { return <div />; }`,
+      'app/routes/appointments/index.tsx': `export default function Appts() { return <div />; }`,
+      'app/routes/appointments/$id.tsx': `export default function Appt() { return <div />; }`,
+      'app/routes/api/users.ts': `export async function loader() { return []; }`,
+    });
+    const detection = makeRemixDetection();
+    const pages = extractPages(parsedFiles, detection, tmpDir);
+
+    expect(pages.find(p => p.route === '/')).toBeDefined();
+    expect(pages.find(p => p.route === '/login')).toBeDefined();
+    expect(pages.find(p => p.route === '/appointments')).toBeDefined();
+    expect(pages.find(p => p.route === '/appointments/:id')).toBeDefined();
+    expect(pages.find(p => p.route === '/api/users')).toBeDefined();
   });
 });

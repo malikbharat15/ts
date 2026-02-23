@@ -759,6 +759,111 @@ function extractNuxtPages(repoPath: string): ExtractedPage[] {
   return pages;
 }
 
+// ─── Remix (v1 folder-based + v2 dot-notation) ─────────────────────────────
+
+/**
+ * Converts a Remix route file path (relative to the routes root) to a URL route.
+ *
+ * Handles both Remix route conventions:
+ *
+ * Remix v1 — folder-based (path contains directory separators):
+ *   appointments/index.tsx         → /appointments
+ *   appointments/$id.tsx           → /appointments/:id
+ *
+ * Remix v2 — flat dot-notation (no subdirectories, dots = path separators):
+ *   _index.tsx                     → /
+ *   login.tsx                      → /login
+ *   appointments._index.tsx        → /appointments
+ *   appointments.$id.tsx           → /appointments/:id
+ *   api.mainframe.branches.ts      → /api/mainframe/branches
+ *   jenkins.deploy-summary.$id.request.tsx  → /jenkins/deploy-summary/:id/request
+ *   workflow-summaries.$appCode.$repo.tsx   → /workflow-summaries/:appCode/:repo
+ *
+ * Special segments:
+ *   _index          → index route (segment dropped, parent path kept)
+ *   index           → same as _index
+ *   $param          → :param  (dynamic URL segment)
+ *   _prefix         → pathless layout name (segment stripped from URL)
+ *   (group)         → route group (segment stripped from URL)
+ */
+export function remixFileToRoute(relPath: string): string | null {
+  const rel = relPath.replace(/\\/g, '/');
+
+  // Strip file extension (.tsx, .ts, .jsx, .js)
+  const noExt = rel.replace(/\.(tsx?|jsx?)$/, '');
+
+  // ── V1: folder-based routing (relative path contains directory separators) ──
+  if (noExt.includes('/')) {
+    const parts = noExt.split('/');
+    const urlSegments: string[] = [];
+    for (const seg of parts) {
+      if (seg === 'index' || seg === '_index') continue;   // index routes
+      if (/^\(.+\)$/.test(seg)) continue;                  // (routeGroup)
+      if (/^_[^_]/.test(seg)) continue;                    // _pathlessLayout
+      if (seg.startsWith('$')) {
+        urlSegments.push(':' + seg.slice(1));               // $param → :param
+      } else if (/^\[.+\]$/.test(seg)) {
+        urlSegments.push(':' + seg.slice(1, -1));           // [param] → :param
+      } else {
+        urlSegments.push(seg);
+      }
+    }
+    return '/' + urlSegments.join('/');
+  }
+
+  // ── V2: flat dot-notation routing ─────────────────────────────────────────
+  // Bare root indices
+  if (noExt === '_index' || noExt === 'index') return '/';
+
+  const segments = noExt.split('.');
+  const urlSegments: string[] = [];
+  for (const seg of segments) {
+    if (seg === '_index') break;             // _index = index of accumulated path: stop here
+    if (/^\(.+\)$/.test(seg)) continue;     // (routeGroup) → skip
+    if (seg.startsWith('_')) continue;      // _pathlessLayout prefix → skip
+    if (seg.startsWith('$')) {
+      urlSegments.push(':' + seg.slice(1)); // $param → :param
+    } else {
+      urlSegments.push(seg);
+    }
+  }
+
+  if (urlSegments.length === 0) return '/';
+  return '/' + urlSegments.join('/');
+}
+
+function extractRemixPages(repoPath: string): ExtractedPage[] {
+  const pages: ExtractedPage[] = [];
+  const seen = new Set<string>();
+
+  // Standard Remix routes directory locations
+  const routesCandidates = [
+    path.join(repoPath, 'app', 'routes'),
+    path.join(repoPath, 'routes'),
+  ];
+
+  for (const routesRoot of routesCandidates) {
+    if (!fs.existsSync(routesRoot)) continue;
+
+    const files = walkDir(routesRoot);
+    for (const f of files) {
+      // Only JS/TS route files
+      const ext = path.extname(f);
+      if (!['.ts', '.tsx', '.js', '.jsx'].includes(ext)) continue;
+
+      const relPath = path.relative(routesRoot, f).replace(/\\/g, '/');
+      const route = remixFileToRoute(relPath);
+      if (!route) continue;
+      if (seen.has(route)) continue;
+      seen.add(route);
+
+      pages.push(makePage(route, f, { confidence: 0.88 }));
+    }
+  }
+
+  return pages;
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -778,6 +883,7 @@ export function extractPages(
   const backends = detection.packages.flatMap((p) => p.backendFrameworks);
   const routers = detection.packages.flatMap((p) => p.routerLibraries);
 
+  const hasRemix = backends.includes("remix") || frontends.includes("remix" as never);
   const hasNextJs =
     frontends.includes("nextjs") || backends.includes("nextjs");
   const hasNuxt = frontends.includes("nuxt") || backends.includes("nuxt");
@@ -797,6 +903,10 @@ export function extractPages(
       }
     }
   };
+
+  if (hasRemix) {
+    addPages(extractRemixPages(repoPath));
+  }
 
   if (hasNextJs) {
     addPages(extractNextJsPages(repoPath));
