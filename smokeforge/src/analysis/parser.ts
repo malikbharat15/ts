@@ -41,5 +41,23 @@ export const SCRIPT_BLOCK_EXTENSIONS = [".vue", ".svelte"];
 export const SKIP_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", ".nuxt",
   ".svelte-kit", "out", "coverage", ".turbo", ".cache", "storybook-static",
-  "public", "static", "assets", ".vercel", ".netlify"
+  "public", "static", "assets", ".vercel", ".netlify",
+  // Test directories — never parse test files
+  "__tests__", "e2e", "cypress", "smoke", "smoketest", "integration", "spec"
 ]);
+
+// File name patterns that identify test files — matched against basename
+export const TEST_FILE_PATTERNS = [
+  /\.test\.[cm]?[jt]sx?$/,
+  /\.spec\.[cm]?[jt]sx?$/,
+  /\.e2e\.[cm]?[jt]sx?$/,
+  /\.it\.[cm]?[jt]sx?$/,
+  /\.integration\.[cm]?[jt]sx?$/,
+  /\.smoke\.[cm]?[jt]sx?$/,
+];
+
+/** Returns true if the filename looks like a test file. */
+export function isTestFile(filePath: string): boolean {
+  const base = filePath.split(/[\/\\]/).pop() ?? "";
+  return TEST_FILE_PATTERNS.some((re) => re.test(base));
+}

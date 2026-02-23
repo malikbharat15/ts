@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import type { TSESTree } from "@typescript-eslint/typescript-estree";
 import type { ParsedFile } from "../parser";
+import { isTestFile } from "../parser";
 import { walk, extractStringValue } from "../../utils/ast-utils";
 import type { DetectionResult } from "../../ingestion/detector";
 import type { ExtractedPage } from "../../blueprint/types";
@@ -17,6 +18,8 @@ const SCAN_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".vue"]);
 const SKIP_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", ".nuxt",
   ".svelte-kit", "out", ".turbo", ".cache", "coverage",
+  // Test directories — never walk into these
+  "__tests__", "e2e", "cypress", "smoke", "smoketest", "integration", "spec",
 ]);
 
 function walkDir(dir: string): string[] {
@@ -30,7 +33,7 @@ function walkDir(dir: string): string[] {
       if (entry.isDirectory()) {
         const nested = walkDir(fullPath);
         results.push(...nested);
-      } else if (entry.isFile() && SCAN_EXTENSIONS.has(path.extname(entry.name))) {
+      } else if (entry.isFile() && SCAN_EXTENSIONS.has(path.extname(entry.name)) && !isTestFile(entry.name)) {
         results.push(fullPath);
       }
     }

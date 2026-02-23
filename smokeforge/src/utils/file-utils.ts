@@ -2,7 +2,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { SKIP_DIRS } from "../analysis/parser";
+import { SKIP_DIRS, isTestFile } from "../analysis/parser";
 
 /**
  * Recursively finds all files with the given extensions under dir.
@@ -27,7 +27,7 @@ export function getAllFiles(dir: string, extensions: string[]): string[] {
         }
       } else if (entry.isFile()) {
         const ext = path.extname(entry.name);
-        if (extensions.includes(ext)) {
+        if (extensions.includes(ext) && !isTestFile(entry.name)) {
           results.push(path.join(current, entry.name));
         }
       }
