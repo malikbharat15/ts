@@ -101,6 +101,28 @@ function extractJSXText(children: TSESTree.JSXChild[]): string | null {
   return null;
 }
 
+/**
+ * Like extractJSXText but recurses into wrapper JSXElements (e.g. Typography,
+ * span, strong) one level deep.  Handles patterns like:
+ *   <Button><Typography variant="inherit">Authorize</Typography></Button>
+ * Concatenates text fragments, strips icon-only segments (no alphabetic chars).
+ */
+function extractJSXTextDeep(children: TSESTree.JSXChild[], maxDepth = 2): string | null {
+  const parts: string[] = [];
+  for (const child of children) {
+    if (child.type === "JSXText") {
+      const text = (child as TSESTree.JSXText).value.trim().replace(/\s+/g, " ");
+      if (text) parts.push(text);
+    } else if (child.type === "JSXElement" && maxDepth > 0) {
+      const nested = extractJSXTextDeep((child as TSESTree.JSXElement).children, maxDepth - 1);
+      if (nested) parts.push(nested);
+    }
+  }
+  const combined = parts.join(" ").trim().replace(/\s+/g, " ");
+  // Only return if the result contains at least one alphabetic character
+  return combined && /[a-zA-Z]/.test(combined) ? combined : null;
+}
+
 /** Check if an attribute name matches any of the test-id conventions. */
 function findTestIdAttr(
   attrs: (TSESTree.JSXAttribute | TSESTree.JSXSpreadAttribute)[]
@@ -264,6 +286,401 @@ function isValidLabelText(t: string | null): t is string {
   return t !== null && t.trim().length >= 2 && /\w/.test(t) && !/^[\W_]+$/.test(t.trim());
 }
 
+// ─── MUI / PascalCase component special handling ────────────────────────────
+//
+// MUI components render as semantic HTML at runtime but have PascalCase names
+// that the extractLocatorFromJSXElement function skips. This function maps the
+// most common MUI (and Remix-compatible) component patterns to Playwright locators.
+//   <Typography variant="h1">Title</Typography>  → getByRole('heading', {name:'Title', level:1})
+//   <Tabs aria-label="nav">                      → getByRole('tablist', {name:'nav'})
+//   <Tab label="Binaries">                       → getByRole('tab', {name:'Binaries'})
+//   <Button>Save</Button>                        → getByRole('button', {name:'Save'})
+//   <TextField label="Email">                    → getByLabel('Email')
+function extractMUIComponentLocator(
+  tag: string,
+  el: TSESTree.JSXElement,
+  _parentNode: TSESTree.Node | null
+): ExtractedLocator | null {
+  const attrs = el.openingElement.attributes;
+
+  // ── Typography → heading (when variant or component prop is h1-h6) ────────
+  if (tag === "Typography") {
+    const variantAttr = getJSXAttr(attrs, "variant");
+    const componentAttr = getJSXAttr(attrs, "component");
+    const effectiveTag = componentAttr.value ?? variantAttr.value ?? "";
+    if (/^h[1-6]$/i.test(effectiveTag)) {
+      const level = headingLevel(effectiveTag);
+      const textContent = extractJSXText(el.children);
+      if (isValidLabelText(textContent)) {
+        const safe = textContent!.replace(/'/g, "\\'");
+        return {
+          id: nextLocId(),
+          name: toCamelCase(textContent!.slice(0, 30)),
+          playwrightCode: `page.getByRole('heading', { name: '${safe}', level: ${level} })`,
+          strategy: "role",
+          elementType: "heading",
+          isInteractive: false,
+          isConditional: false,
+          isDynamic: false,
+          confidence: 0.80,
+          flags: [],
+        };
+      }
+    }
+    return null;
+  }
+
+  // ── Tabs → tablist  ────────────────────────────────────────────────────────
+  if (tag === "Tabs") {
+    const ariaLabel = getJSXAttr(attrs, "aria-label");
+    if (ariaLabel.exists && ariaLabel.value) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(ariaLabel.value),
+        playwrightCode: `page.getByRole('tablist', { name: '${ariaLabel.value.replace(/'/g, "\\'")}'  })`,
+        strategy: "role",
+        elementType: "other",
+        isInteractive: false,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.85,
+        flags: [],
+      };
+    }
+    return null;
+  }
+
+  // ── Tab → tab  ─────────────────────────────────────────────────────────────
+  if (tag === "Tab") {
+    const labelAttr = getJSXAttr(attrs, "label");
+    if (labelAttr.exists && labelAttr.value) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(labelAttr.value),
+        playwrightCode: `page.getByRole('tab', { name: '${labelAttr.value.replace(/'/g, "\\'")}'  })`,
+        strategy: "role",
+        elementType: "other",
+        isInteractive: true,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.85,
+        flags: [],
+      };
+    }
+    // Tab with child text
+    const textContent = extractJSXText(el.children);
+    if (isValidLabelText(textContent)) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(textContent!.slice(0, 30)),
+        playwrightCode: `page.getByRole('tab', { name: '${textContent!.replace(/'/g, "\\'")}'  })`,
+        strategy: "role",
+        elementType: "other",
+        isInteractive: true,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.80,
+        flags: [],
+      };
+    }
+    return null;
+  }
+
+  // ── Button / IconButton / LoadingButton (MUI) → button  ────────────────────
+  if (tag === "Button" || tag === "IconButton" || tag === "LoadingButton") {
+    const ariaLabel = getJSXAttr(attrs, "aria-label");
+    if (ariaLabel.exists && ariaLabel.value) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(ariaLabel.value),
+        playwrightCode: `page.getByRole('button', { name: '${ariaLabel.value.replace(/'/g, "\\'")}'  })`,
+        strategy: "role",
+        elementType: "button",
+        isInteractive: true,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.85,
+        flags: [],
+      };
+    }
+    // Use deep extraction so text inside wrapper elements like <Typography> is found:
+    //   <Button><Typography variant="inherit">Authorize</Typography></Button>
+    const textContent = extractJSXTextDeep(el.children);
+    if (isValidLabelText(textContent)) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(textContent!.slice(0, 30)),
+        playwrightCode: `page.getByRole('button', { name: '${textContent!.replace(/'/g, "\\'")}'  })`,
+        strategy: "role",
+        elementType: "button",
+        isInteractive: true,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.80,
+        flags: [],
+      };
+    }
+    return null;
+  }
+
+  // ── TextField / Autocomplete (MUI) → getByLabel  ───────────────────────────
+  if (tag === "TextField" || tag === "Autocomplete") {
+    const labelAttr = getJSXAttr(attrs, "label");
+    if (labelAttr.exists && labelAttr.value) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(labelAttr.value),
+        playwrightCode: `page.getByLabel('${labelAttr.value.replace(/'/g, "\\'")}'  )`,
+        strategy: "label",
+        elementType: "input",
+        isInteractive: true,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.85,
+        flags: [],
+      };
+    }
+    const ariaLabel = getJSXAttr(attrs, "aria-label");
+    if (ariaLabel.exists && ariaLabel.value) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(ariaLabel.value),
+        playwrightCode: `page.getByLabel('${ariaLabel.value.replace(/'/g, "\\'")}'  )`,
+        strategy: "label",
+        elementType: "input",
+        isInteractive: true,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.85,
+        flags: [],
+      };
+    }
+    return null;
+  }
+
+  // ── Select (MUI controlled)  ───────────────────────────────────────────────
+  if (tag === "Select") {
+    const labelAttr = getJSXAttr(attrs, "label");
+    if (labelAttr.exists && labelAttr.value) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(labelAttr.value),
+        playwrightCode: `page.getByLabel('${labelAttr.value.replace(/'/g, "\\'")}'  )`,
+        strategy: "label",
+        elementType: "select",
+        isInteractive: true,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.80,
+        flags: [],
+      };
+    }
+    return null;
+  }
+
+  // ── MenuItem → menuitem role  ──────────────────────────────────────────────
+  // <MenuItem>Export CSV</MenuItem>  →  getByRole('menuitem', { name: 'Export CSV' })
+  // Also handles <MenuItem value={x}>Label</MenuItem>
+  if (tag === "MenuItem") {
+    const textContent = extractJSXTextDeep(el.children);
+    if (isValidLabelText(textContent)) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(textContent!.slice(0, 30)),
+        playwrightCode: `page.getByRole('menuitem', { name: '${textContent!.replace(/'/g, "\\'")}'  })`,
+        strategy: "role",
+        elementType: "other",
+        isInteractive: true,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.78,
+        flags: [],
+      };
+    }
+    return null;
+  }
+
+  // ── Link (MUI) → link role  ────────────────────────────────────────────────
+  // <Link href="/dashboard">Dashboard</Link>  →  getByRole('link', { name: 'Dashboard' })
+  // MUI Link renders as <a>; grab text or aria-label
+  if (tag === "Link") {
+    const ariaLabel = getJSXAttr(attrs, "aria-label");
+    if (ariaLabel.exists && ariaLabel.value) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(ariaLabel.value),
+        playwrightCode: `page.getByRole('link', { name: '${ariaLabel.value.replace(/'/g, "\\'")}'  })`,
+        strategy: "role",
+        elementType: "link",
+        isInteractive: true,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.85,
+        flags: [],
+      };
+    }
+    const textContent = extractJSXTextDeep(el.children);
+    if (isValidLabelText(textContent)) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(textContent!.slice(0, 30)),
+        playwrightCode: `page.getByRole('link', { name: '${textContent!.replace(/'/g, "\\'")}'  })`,
+        strategy: "role",
+        elementType: "link",
+        isInteractive: true,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.80,
+        flags: [],
+      };
+    }
+    return null;
+  }
+
+  // ── ListItemText → getByText (best-effort; no stable role)  ───────────────
+  // <ListItemText primary="Dashboard" />  →  page.getByText('Dashboard')
+  // Used heavily in MUI sidebar/drawer navigation. No reliable role since
+  // ListItem renders as <li> which has many siblings. Flag as BRITTLE.
+  if (tag === "ListItemText") {
+    const primaryAttr = getJSXAttr(attrs, "primary");
+    if (primaryAttr.exists && primaryAttr.value && !primaryAttr.isDynamic) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(primaryAttr.value.slice(0, 30)),
+        playwrightCode: `page.getByText('${primaryAttr.value.replace(/'/g, "\\'")}'  )`,
+        strategy: "text",
+        elementType: "other",
+        isInteractive: false,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.55,
+        flags: ["BRITTLE"],
+      };
+    }
+    return null;
+  }
+
+  // ── Chip → button (when clickable/deletable) or text  ─────────────────────
+  // <Chip label="Admin" onClick={...} />  →  getByRole('button', { name: 'Admin' })
+  // <Chip label="Tag" />                  →  getByText('Tag')  (BRITTLE)
+  if (tag === "Chip") {
+    const labelAttr = getJSXAttr(attrs, "label");
+    if (labelAttr.exists && labelAttr.value && !labelAttr.isDynamic) {
+      const hasOnClick = attrs.some(
+        a => a.type === "JSXAttribute" && (a as TSESTree.JSXAttribute).name.type === "JSXIdentifier" &&
+        ((a as TSESTree.JSXAttribute).name as TSESTree.JSXIdentifier).name === "onClick"
+      );
+      const hasOnDelete = attrs.some(
+        a => a.type === "JSXAttribute" && (a as TSESTree.JSXAttribute).name.type === "JSXIdentifier" &&
+        ((a as TSESTree.JSXAttribute).name as TSESTree.JSXIdentifier).name === "onDelete"
+      );
+      const safe = labelAttr.value.replace(/'/g, "\\'");
+      if (hasOnClick || hasOnDelete) {
+        return {
+          id: nextLocId(),
+          name: toCamelCase(labelAttr.value.slice(0, 30)),
+          playwrightCode: `page.getByRole('button', { name: '${safe}'  })`,
+          strategy: "role",
+          elementType: "button",
+          isInteractive: true,
+          isConditional: false,
+          isDynamic: false,
+          confidence: 0.78,
+          flags: [],
+        };
+      }
+      return {
+        id: nextLocId(),
+        name: toCamelCase(labelAttr.value.slice(0, 30)),
+        playwrightCode: `page.getByText('${safe}'  )`,
+        strategy: "text",
+        elementType: "other",
+        isInteractive: false,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.55,
+        flags: ["BRITTLE"],
+      };
+    }
+    return null;
+  }
+
+  // ── Alert → alert role  ────────────────────────────────────────────────────
+  // <Alert severity="error">Email is required</Alert>  →  getByRole('alert')
+  // Qualifies with text content when possible; falls back to bare role.
+  if (tag === "Alert") {
+    const textContent = extractJSXTextDeep(el.children);
+    if (isValidLabelText(textContent)) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(textContent!.slice(0, 30)),
+        playwrightCode: `page.getByRole('alert').filter({ hasText: '${textContent!.replace(/'/g, "\\'")}'  })`,
+        strategy: "role",
+        elementType: "other",
+        isInteractive: false,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.75,
+        flags: [],
+      };
+    }
+    // Bare role — still useful for smoke: verify an alert is present
+    return {
+      id: nextLocId(),
+      name: "alertMessage",
+      playwrightCode: `page.getByRole('alert')`,
+      strategy: "role",
+      elementType: "other",
+      isInteractive: false,
+      isConditional: false,
+      isDynamic: false,
+      confidence: 0.60,
+      flags: [],
+    };
+  }
+
+  // ── Dialog / Modal → dialog role  ─────────────────────────────────────────
+  // Finds `aria-labelledby` then looks for the heading text inside children.
+  // <Dialog aria-labelledby="confirm-title"><h2 id="confirm-title">Confirm</h2>…</Dialog>
+  // Falls back to bare getByRole('dialog') when no label can be resolved.
+  if (tag === "Dialog" || tag === "Modal") {
+    const ariaLabel = getJSXAttr(attrs, "aria-label");
+    if (ariaLabel.exists && ariaLabel.value) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(ariaLabel.value),
+        playwrightCode: `page.getByRole('dialog', { name: '${ariaLabel.value.replace(/'/g, "\\'")}'  })`,
+        strategy: "role",
+        elementType: "other",
+        isInteractive: false,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.82,
+        flags: [],
+      };
+    }
+    // Try to read heading text directly from children (h1-h6 or Typography h*)
+    const heading = extractJSXTextDeep(el.children);
+    if (isValidLabelText(heading)) {
+      return {
+        id: nextLocId(),
+        name: toCamelCase(heading!.slice(0, 30)),
+        playwrightCode: `page.getByRole('dialog', { name: '${heading!.replace(/'/g, "\\'")}'  })`,
+        strategy: "role",
+        elementType: "other",
+        isInteractive: false,
+        isConditional: false,
+        isDynamic: false,
+        confidence: 0.65,
+        flags: [],
+      };
+    }
+    return null;  // no name discoverable — would create false positives
+  }
+
+  return null;
+}
+
 function extractLocatorFromJSXElement(
   el: TSESTree.JSXElement,
   parentNode: TSESTree.Node | null,
@@ -274,10 +691,10 @@ function extractLocatorFromJSXElement(
   const tag = getJSXTagName(opening.name);
   if (!tag) return null;
 
-  // Skip non-HTML elements that are obviously just React components (PascalCase)
-  // but allow lowercase HTML tags
+  // Skip non-HTML elements — but first try to extract locators from known
+  // MUI/PascalCase components (Typography, Tabs, Tab, Button, TextField, etc.)
   const isHTMLTag = tag === tag.toLowerCase();
-  if (!isHTMLTag) return null;
+  if (!isHTMLTag) return extractMUIComponentLocator(tag, el, parentNode);
 
   const attrs = opening.attributes;
   const inputTypeAttr = getJSXAttr(attrs, "type");

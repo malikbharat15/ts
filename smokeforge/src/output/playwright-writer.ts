@@ -1,13 +1,17 @@
 import * as path from "path";
 import type { BlueprintChunk } from "../blueprint/chunker";
 import type { AuthConfig } from "../blueprint/types";
+import { classifyAuthStrategy } from "../blueprint/chunker";
 import { ensureDir, writeFile } from "../utils/file-utils";
 
 // ─── Static file content ──────────────────────────────────────────────────────
 
 function buildPlaywrightConfig(auth: AuthConfig | null, baseUrl: string): string {
-  const storageStateLine = auth?.tokenType === "oauth_sso"
-    ? `\n    storageState: process.env.PLAYWRIGHT_AUTH_STATE || undefined,`
+  const strategy = classifyAuthStrategy(auth);
+  const isStorageState = strategy === "storageState";
+  const globalSetupLine = isStorageState ? `\n  globalSetup: './auth.setup.ts',` : "";
+  const storageStateLine = isStorageState
+    ? `\n    storageState: './smoke/auth.state.json',`
     : "";
   return `import { defineConfig, devices } from '@playwright/test';
 
@@ -15,7 +19,7 @@ export default defineConfig({
   testDir: './smoke',
   grep: /@smoke/,
   timeout: 30000,
-  retries: 0,
+  retries: 0,${globalSetupLine}
   use: {
     baseURL: process.env.BASE_URL || '${baseUrl}',
     extraHTTPHeaders: { 'x-smokeforge-test': 'true' },${storageStateLine}
@@ -28,78 +32,180 @@ export default defineConfig({
 `;
 }
 
-function buildAuthFixture(auth: AuthConfig | null, baseUrl = "http://localhost:3000"): string {
-  // ── SSO / OAuth apps: use storageState instead of form/JSON login ───────────
-  if (auth?.tokenType === "oauth_sso") {
-    return `// ⚠️  SSO / OAuth authentication detected (SAML / OIDC / OAuth2).
-//
-// These tests CANNOT automate the external IdP login flow directly.
-// Instead, use Playwright's storageState to reuse a pre-authenticated session:
-//
-//   Step 1 — Run the auth setup script once to save your session:
-//     npx playwright codegen --save-storage=auth.json <BASE_URL>
-//     (Log in manually via SSO, then Ctrl+C — auth.json will contain your cookies/tokens)
-//
-//   Step 2 — Set the env var:
-//     PLAYWRIGHT_AUTH_STATE=./auth.json
-//
-//   Step 3 — Tests will load the saved state automatically (see playwright.config.ts).
-//
-// Alternative: if a non-SSO service account exists, set:
-//   SMOKE_TEST_EMAIL, SMOKE_TEST_PASSWORD and update the login logic below.
+// ─── auth.setup.ts — global setup for storageState strategies ────────────────
 
-import { test as base } from '@playwright/test';
-export const test = base; // storageState is loaded via playwright.config.ts globalSetup
+export function buildAuthSetupFile(auth: AuthConfig, baseUrl: string): string {
+  const fallbackEmail = auth.defaultEmail ?? "admin@example.com";
+  const fallbackPassword = auth.defaultPassword ?? "SmokeTest123!";
+
+  // OAuth SSO / Firebase / Supabase / Clerk — can't automate IdP login
+  if (
+    auth.tokenType === "oauth_sso" ||
+    auth.tokenType === "firebase" ||
+    auth.tokenType === "supabase" ||
+    auth.tokenType === "clerk"
+  ) {
+    return `// ⚠️  External Identity Provider detected (${auth.tokenType}).
+//
+// This globalSetup cannot automate the IdP login flow directly.
+//
+// TO FIX: run Playwright codegen once to capture a logged-in session:
+//   npx playwright codegen --save-storage=smoke/auth.state.json ${baseUrl}
+//   (Log in manually, then Ctrl-C — auth.state.json will be saved)
+//
+// Once auth.state.json exists, playwright.config.ts will load it automatically.
+
+import type { FullConfig } from '@playwright/test';
+
+export default async function globalSetup(_config: FullConfig): Promise<void> {
+  // Session captured via codegen — nothing to do here at runtime.
+  // Delete smoke/auth.state.json and re-run codegen whenever your session expires.
+}
 `;
   }
 
-  const loginPath = auth?.loginEndpoint
-    ? // loginEndpoint format: "POST /api/v1/auth/login" — strip the method prefix
-      auth.loginEndpoint.replace(/^[A-Z]+\s+/, "")
-    : "/api/v1/auth/login";
+  const loginPath = auth.loginEndpoint.replace(/^[A-Z]+\s+/, "");
+  const ef = auth.credentialsFields.emailField;
+  const pf = auth.credentialsFields.passwordField;
 
-  const emailField = auth?.credentialsFields?.emailField ?? "email";
-  const passwordField = auth?.credentialsFields?.passwordField ?? "password";
-  const tokenPath = auth?.tokenResponsePath ?? "accessToken";
-  const loginBodyFormat = auth?.loginBodyFormat ?? "json";
+  if (auth.tokenType === "next_auth") {
+    return `import { request as playwrightRequest } from '@playwright/test';
+import type { FullConfig } from '@playwright/test';
+import * as fs from 'fs';
+import * as path from 'path';
 
-  // Build the token extraction expression (supports dot-notation like "data.token")
-  const segments = tokenPath.split(".");
-  const tokenExpr = segments.reduce((acc, seg) => `${acc}.${seg}`, "body");
+const BASE_URL  = process.env.BASE_URL  || '${baseUrl}';
+const EMAIL     = process.env.SMOKE_TEST_EMAIL    || '${fallbackEmail}';
+const PASSWORD  = process.env.SMOKE_TEST_PASSWORD || '${fallbackPassword}';
 
-  // Use seed-extracted credentials as fallbacks when available
-  const fallbackEmail = auth?.defaultEmail ?? 'smoketest@example.com';
-  const fallbackPassword = auth?.defaultPassword ?? 'SmokeTest123!';
+export default async function globalSetup(_config: FullConfig): Promise<void> {
+  const ctx = await playwrightRequest.newContext();
 
-  // Use the correct Playwright body option: form-urlencoded vs JSON
-  const bodyOption = loginBodyFormat === "form"
-    ? `form: {
-          ${emailField}: process.env.SMOKE_TEST_EMAIL || '${fallbackEmail}',
-          ${passwordField}: process.env.SMOKE_TEST_PASSWORD || '${fallbackPassword}',
-        }`
-    : `data: {
-          ${emailField}: process.env.SMOKE_TEST_EMAIL || '${fallbackEmail}',
-          ${passwordField}: process.env.SMOKE_TEST_PASSWORD || '${fallbackPassword}',
-        }`;
+  // Step 1: Fetch NextAuth CSRF token (required before credentials login)
+  const csrfResp = await ctx.get(BASE_URL + '/api/auth/csrf');
+  if (!csrfResp.ok()) throw new Error(\`CSRF fetch failed: \${csrfResp.status()}\`);
+  const { csrfToken } = await csrfResp.json();
 
-  return `import { test as base, request } from '@playwright/test';
+  // Step 2: POST credentials + csrfToken to credentials callback
+  const resp = await ctx.post(BASE_URL + '/api/auth/callback/credentials', {
+    form: {
+      ${ef}: EMAIL,
+      ${pf}: PASSWORD,
+      csrfToken,
+      callbackUrl: BASE_URL + '/dashboard',
+      json: 'true',
+    },
+  });
+  if (![200, 302].includes(resp.status())) {
+    throw new Error(\`NextAuth login failed: HTTP \${resp.status()}\`);
+  }
 
-type AuthFixtures = { authToken: string };
+  // Save session cookies to smoke/auth.state.json
+  const stateDir = path.join(__dirname, 'smoke');
+  fs.mkdirSync(stateDir, { recursive: true });
+  await ctx.storageState({ path: path.join(stateDir, 'auth.state.json') });
+  await ctx.dispose();
+}
+`;
+  }
 
-export const test = base.extend<AuthFixtures>({
-  authToken: async ({}, use) => {
-    const ctx = await request.newContext();
-    const response = await ctx.post(
-      \`\${process.env.BASE_URL || '${baseUrl}'}${loginPath}\`,
-      {
-        ${bodyOption}
-      }
-    );
-    const body = await response.json();
-    await use(${tokenExpr});
-    await ctx.dispose();
-  },
-});
+  // session_cookie (form or JSON login)
+  const bodyOpt = auth.loginBodyFormat === "form"
+    ? `{ form: { ${ef}: EMAIL, ${pf}: PASSWORD } }`
+    : `{ data: { ${ef}: EMAIL, ${pf}: PASSWORD } }`;
+
+  return `import { request as playwrightRequest } from '@playwright/test';
+import type { FullConfig } from '@playwright/test';
+import * as fs from 'fs';
+import * as path from 'path';
+
+const BASE_URL  = process.env.BASE_URL  || '${baseUrl}';
+const EMAIL     = process.env.SMOKE_TEST_EMAIL    || '${fallbackEmail}';
+const PASSWORD  = process.env.SMOKE_TEST_PASSWORD || '${fallbackPassword}';
+
+export default async function globalSetup(_config: FullConfig): Promise<void> {
+  const ctx = await playwrightRequest.newContext();
+
+  const resp = await ctx.post(BASE_URL + '${loginPath}', ${bodyOpt});
+  if (![200, 201, 302].includes(resp.status())) {
+    throw new Error(\`Login failed: HTTP \${resp.status()}\`);
+  }
+
+  // Save session cookies to smoke/auth.state.json (loaded by playwright.config.ts)
+  const stateDir = path.join(__dirname, 'smoke');
+  fs.mkdirSync(stateDir, { recursive: true });
+  await ctx.storageState({ path: path.join(stateDir, 'auth.state.json') });
+  await ctx.dispose();
+}
+`;
+}
+
+function buildAuthFixture(auth: AuthConfig | null, baseUrl = "http://localhost:3000"): string {
+  const strategy = classifyAuthStrategy(auth);
+
+  // storageState apps: session is loaded by playwright.config.ts globalSetup.
+  // Spec files just use the built-in { page } and { request } fixtures directly.
+  if (strategy === "storageState") {
+    return `// Auth note: session is loaded globally via auth.setup.ts → playwright.config.ts storageState.
+// Spec files should use the built-in Playwright { page } and { request } fixtures directly —
+// no manual login is needed inside individual tests.
+
+import { test, expect } from '@playwright/test';
+export { test, expect };
+`;
+  }
+
+  // bearer_inline apps: LLM generates module-level ctx + beforeAll in each spec file.
+  if (strategy === "bearer_inline") {
+    const loginPath = auth?.loginEndpoint
+      ? auth.loginEndpoint.replace(/^[A-Z]+\s+/, "")
+      : "/api/v1/auth/login";
+    const ef    = auth?.credentialsFields?.emailField   ?? "email";
+    const pf    = auth?.credentialsFields?.passwordField ?? "password";
+    const tokenPath  = auth?.tokenResponsePath ?? "accessToken";
+    const fallbackEmail    = auth?.defaultEmail    ?? "smoketest@example.com";
+    const fallbackPassword = auth?.defaultPassword ?? "SmokeTest123!";
+    const bodyOption = auth?.loginBodyFormat === "form"
+      ? `form: { ${ef}: EMAIL, ${pf}: PASSWORD }`
+      : `data: { ${ef}: EMAIL, ${pf}: PASSWORD }`;
+    return `// Auth pattern for bearer-token apps:
+// Each spec file must set up a module-level APIRequestContext in test.beforeAll.
+//
+// EXACT PATTERN (copy into each spec file):
+//
+//   import { test, expect, request as playwrightRequest } from '@playwright/test';
+//   import type { APIRequestContext } from '@playwright/test';
+//
+//   const BASE_URL  = process.env.BASE_URL  || '${baseUrl}';
+//   const EMAIL     = process.env.SMOKE_TEST_EMAIL    || '${fallbackEmail}';
+//   const PASSWORD  = process.env.SMOKE_TEST_PASSWORD || '${fallbackPassword}';
+//   let ctx: APIRequestContext;
+//   let authToken: string;
+//
+//   test.beforeAll(async () => {
+//     ctx = await playwrightRequest.newContext();
+//     const loginResp = await ctx.post(BASE_URL + '${loginPath}', { ${bodyOption} });
+//     const body = await loginResp.json();
+//     authToken = body.${tokenPath};
+//   });
+//   test.afterAll(async () => { await ctx.dispose(); });
+//
+//   // In each test — use ctx and pass Authorization header:
+//   test('title @smoke', async () => {
+//     const resp = await ctx.get(BASE_URL + '/api/resource', {
+//       headers: { 'Authorization': \`Bearer \${authToken}\` },
+//     });
+//     expect(resp.status()).toBe(200);
+//   });
+
+import { test, expect } from '@playwright/test';
+export { test, expect };
+`;
+  }
+
+  // none / public apps
+  return `import { test, expect } from '@playwright/test';
+export { test, expect };
 `;
 }
 
@@ -160,6 +266,8 @@ export async function writePlaywrightOutput(
     ensureDir(fixturesDir),
   ]);
 
+  const strategy = classifyAuthStrategy(auth);
+
   // 1. Write one spec file per generated chunk (replace any hardcoded localhost:3000 with actual baseUrl)
   for (const { chunk, code } of generatedSpecs) {
     const specPath = path.join(smokeDir, chunk.outputFileName);
@@ -173,19 +281,27 @@ export async function writePlaywrightOutput(
     buildPlaywrightConfig(auth, baseUrl)
   );
 
-  // 3. Write fixtures/auth.fixture.ts
+  // 3. Emit auth.setup.ts for storageState strategies (session runs once via globalSetup)
+  if (strategy === "storageState" && auth) {
+    writeFile(
+      path.join(playwrightDir, "auth.setup.ts"),
+      buildAuthSetupFile(auth, baseUrl)
+    );
+  }
+
+  // 4. Write fixtures/auth.fixture.ts
   writeFile(
     path.join(fixturesDir, "auth.fixture.ts"),
     buildAuthFixture(auth, baseUrl)
   );
 
-  // 4. Write package.json
+  // 5. Write package.json
   const repoSlug = path.basename(outputDir).replace(/[^a-z0-9-]/gi, "-").toLowerCase();
   writeFile(
     path.join(playwrightDir, "package.json"),
     buildPackageJson(`${repoSlug}-smoke`)
   );
 
-  // 5. Write .env.example at the output root
+  // 6. Write .env.example at the output root
   writeFile(path.join(outputDir, ".env.example"), buildEnvExample(auth, baseUrl));
 }

@@ -1,137 +1,140 @@
 import type { BlueprintChunk } from "../blueprint/chunker";
-import type { AuthConfig, ExtractedEndpoint, ExtractedPage } from "../blueprint/types";
+import type { ExtractedEndpoint, ExtractedPage } from "../blueprint/types";
 
 // ─── Auth notes builder ───────────────────────────────────────────────────────
 
-function buildAuthNotes(auth: AuthConfig | null): string {
-  if (!auth) return "No auth detected. All endpoints are public.";
+/**
+ * Builds the AUTH USAGE NOTES section of the LLM prompt.
+ *
+ * Strategy determines the entire auth pattern for the generated spec file:
+ *
+ * - storageState  → Login happened ONCE in auth.setup.ts (globalSetup). This spec file
+ *                   must NOT contain any login logic. { page } and { request } fixtures
+ *                   already carry the authenticated session from storageState.
+ *
+ * - bearer_inline → One beforeAll per file gets a token; ALL tests in this file share it
+ *                   via module-level ctx + authToken variables.
+ *
+ * - none          → App is public; no auth setup needed anywhere.
+ */
+function buildAuthNotes(chunk: BlueprintChunk): string {
+  const { auth, authStrategy } = chunk;
 
-  if (auth.tokenType === "session_cookie") {
-    const cookieName = auth.authCookieName ?? "session";
-    const loginPath = auth.loginEndpoint.replace(/^POST\s+/, "");
-    const ef = auth.credentialsFields.emailField;
-    const pf = auth.credentialsFields.passwordField;
-    const bodyOpt = auth.loginBodyFormat === "form"
-      ? `{ form: { ${ef}: EMAIL, ${pf}: PASSWORD } }`
-      : `{ data: { ${ef}: EMAIL, ${pf}: PASSWORD } }`;
+  // ── none: public app ───────────────────────────────────────────────────────
+  if (authStrategy === "none" || !auth) {
     return [
-      `Auth type: SESSION COOKIE (not Bearer JWT)`,
-      `Login endpoint: ${auth.loginEndpoint}`,
-      `Login body format: ${auth.loginBodyFormat === "form" ? "FORM (application/x-www-form-urlencoded)" : "JSON (application/json)"}`,
-      `Cookie name: ${cookieName}`,
-      ``,
-      `CRITICAL — PLAYWRIGHT FIXTURE ISOLATION:`,
-      `Playwright's built-in { request } fixture is scoped per-test. Cookies set in test.beforeAll({ request }) are LOST when individual test({ request }) runs.`,
-      `For session cookie auth, you MUST manage the APIRequestContext manually at module level so the same cookie jar is used across all tests.`,
-      ``,
-      `USE THIS EXACT PATTERN for every session-cookie API test file (copy precisely):`,
-      ``,
-      `import { test, expect, request as playwrightRequest } from '@playwright/test';`,
-      `import type { APIRequestContext } from '@playwright/test';`,
-      ``,
-      `let ctx: APIRequestContext;`,
-      ``,
-      `test.beforeAll(async () => {`,
-      `  ctx = await playwrightRequest.newContext();`,
-      `  const resp = await ctx.post(BASE_URL + '${loginPath}', ${bodyOpt});`,
-      `  expect([200, 302]).toContain(resp.status());`,
-      `});`,
-      ``,
-      `test.afterAll(async () => { await ctx.dispose(); });`,
-      ``,
-      `// In each test body — use 'ctx', NOT a { request } parameter:`,
-      `test('title @smoke', async () => {`,
-      `  const response = await ctx.get(BASE_URL + '/api/resource');`,
-      `  expect(response.status()).toBe(200);`,
-      `});`,
-      ``,
-      `RULES:`,
-      `- NEVER add { request } to individual test() signatures — use module-level ctx`,
-      `- DO NOT use test.beforeAll(async ({ request }) => {...}) — use test.beforeAll(async () => {...})`,
-      `- For page (browser) tests using { page }: fill and submit the login form — page context stores cookies automatically`,
-      auth.defaultEmail ? `\nSEED CREDENTIALS (use as fallbacks in generated code):` : ``,
-      auth.defaultEmail ? `  Default email:    ${auth.defaultEmail}` : ``,
-      auth.defaultPassword ? `  Default password: ${auth.defaultPassword}` : ``,
-      auth.defaultEmail ? `  In generated code use: process.env.SMOKE_TEST_EMAIL || '${auth.defaultEmail}'` : ``,
-      auth.defaultPassword ? `  In generated code use: process.env.SMOKE_TEST_PASSWORD || '${auth.defaultPassword}'` : ``,
-    ].filter(Boolean).join("\n");
+      `AUTH STRATEGY: NONE — this application has no authentication.`,
+      `All endpoints and pages are publicly accessible.`,
+      `DO NOT generate any login logic, beforeAll auth setup, or Authorization headers.`,
+      `Just make requests directly and navigate to pages.`,
+    ].join("\n");
   }
 
-  if (auth.tokenType === "next_auth") {
-    const ef = auth.credentialsFields.emailField;
-    const pf = auth.credentialsFields.passwordField;
-    const fallbackEmail = auth.defaultEmail ?? "admin@example.com";
+  // ── storageState: session already loaded by globalSetup ───────────────────
+  if (authStrategy === "storageState") {
+    const fallbackEmail = auth.defaultEmail ?? "smoketest@example.com";
     const fallbackPassword = auth.defaultPassword ?? "SmokeTest123!";
     return [
-      `Auth type: NEXT-AUTH SESSION (NextAuth.js credentials provider)`,
-      `Cookie name: ${auth.authCookieName ?? "next-auth.session-token"}`,
+      `AUTH STRATEGY: STORAGE STATE`,
       ``,
-      `CRITICAL — NextAuth login requires a CSRF token first. Use this EXACT pattern:`,
+      `⚠️  CRITICAL — DO NOT write any login logic in this spec file.`,
       ``,
-      `import { test, expect, request as playwrightRequest } from '@playwright/test';`,
-      `import type { APIRequestContext } from '@playwright/test';`,
+      `The session has already been established ONCE by the shared auth.setup.ts globalSetup`,
+      `and saved to smoke/auth.state.json. Playwright loads it automatically for every spec`,
+      `via storageState in playwright.config.ts.`,
       ``,
-      `const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';`,
-      `const EMAIL = process.env.SMOKE_TEST_EMAIL || '${fallbackEmail}';`,
-      `const PASSWORD = process.env.SMOKE_TEST_PASSWORD || '${fallbackPassword}';`,
+      `WHAT THIS MEANS FOR YOUR GENERATED CODE:`,
+      `- NO beforeAll login / CSRF / newContext() auth setup`,
+      `- NO import of playwrightRequest or APIRequestContext for session setup`,
+      `- NO calls to any /auth/login, /api/auth/csrf, or /api/auth/callback endpoints`,
       ``,
-      `let ctx: APIRequestContext;`,
-      ``,
-      `test.beforeAll(async () => {`,
-      `  ctx = await playwrightRequest.newContext();`,
-      `  // Step 1: Get CSRF token (required by NextAuth)`,
-      `  const csrfResp = await ctx.get(BASE_URL + '/api/auth/csrf');`,
-      `  const { csrfToken } = await csrfResp.json();`,
-      `  // Step 2: POST credentials + csrfToken as form data`,
-      `  const resp = await ctx.post(BASE_URL + '/api/auth/callback/credentials', {`,
-      `    form: {`,
-      `      ${ef}: EMAIL,`,
-      `      ${pf}: PASSWORD,`,
-      `      csrfToken,`,
-      `      callbackUrl: BASE_URL + '/dashboard',`,
-      `      json: 'true',`,
-      `    },`,
+      `FOR UI PAGES (use { page } fixture):`,
+      `  test('dashboard @smoke', async ({ page }) => {`,
+      `    await page.goto(process.env.BASE_URL + '/dashboard');`,
+      `    await expect(page.getByRole('heading')).toBeVisible();`,
       `  });`,
-      `  // NextAuth returns 200 (with JSON) or 302 redirect on success`,
-      `  expect([200, 302]).toContain(resp.status());`,
-      `  // The session cookie is stored automatically in ctx's cookie jar`,
-      `});`,
       ``,
-      `test.afterAll(async () => { await ctx.dispose(); });`,
-      ``,
-      `// In each test body — use 'ctx', NOT a { request } parameter:`,
-      `test('title @smoke', async () => {`,
-      `  const response = await ctx.get(BASE_URL + '/api/resource');`,
-      `  expect(response.status()).toBe(200);`,
-      `});`,
+      `FOR API ENDPOINTS that use session cookies (use { request } fixture):`,
+      `  test('GET /api/users @smoke', async ({ request }) => {`,
+      `    const response = await request.get(process.env.BASE_URL + '/api/users');`,
+      `    expect(response.status()).toBe(200);`,
+      `  });`,
       ``,
       `RULES:`,
-      `- NEVER add { request } to individual test() signatures — use module-level ctx`,
-      `- DO NOT use test.beforeAll(async ({ request }) => {...}) — use test.beforeAll(async () => {...})`,
-      `- The CSRF step is MANDATORY — skipping it causes 403 CSRF errors`,
-      `- For page (browser) tests using { page }: fill and submit the /login form — page context stores cookies automatically`,
-      auth.defaultEmail ? `\nSEED CREDENTIALS (use as fallbacks in generated code):` : ``,
-      auth.defaultEmail ? `  Default email:    ${auth.defaultEmail}` : ``,
-      auth.defaultPassword ? `  Default password: ${auth.defaultPassword}` : ``,
-      auth.defaultEmail ? `  In generated code use: process.env.SMOKE_TEST_EMAIL || '${auth.defaultEmail}'` : ``,
-      auth.defaultPassword ? `  In generated code use: process.env.SMOKE_TEST_PASSWORD || '${auth.defaultPassword}'` : ``,
-    ].filter(Boolean).join("\n");
+      `- The { page } and { request } fixtures automatically carry the storageState session`,
+      `- DO NOT use request.newContext() — it would create a fresh unauthenticated context`,
+      `- DO NOT add auth headers manually — session cookies handle auth`,
+      auth.defaultEmail ? `` : ``,
+      auth.defaultEmail ? `SEED CREDENTIALS (for reference only — do not use in login code):` : ``,
+      auth.defaultEmail ? `  Default email:    ${fallbackEmail}` : ``,
+      auth.defaultPassword ? `  Default password: ${fallbackPassword}` : ``,
+    ].filter(s => s !== undefined).join("\n");
   }
 
-  // Default: bearer JWT
-  const playwrightLoginOption = auth.loginBodyFormat === "form"
-    ? `{ form: { ${auth.credentialsFields.emailField}: EMAIL, ${auth.credentialsFields.passwordField}: PASSWORD } }  // form-urlencoded`
-    : `{ data: { ${auth.credentialsFields.emailField}: EMAIL, ${auth.credentialsFields.passwordField}: PASSWORD } }  // JSON body`;
+  // ── bearer_inline: one beforeAll per file, shared token ───────────────────
+  // (bearer_jwt, api_key_header, api_key_query, basic_auth, oauth_bearer)
+  const loginPath = auth.loginEndpoint.replace(/^[A-Z]+\s+/, "");
+  const ef = auth.credentialsFields.emailField;
+  const pf = auth.credentialsFields.passwordField;
+  const tokenPath = auth.tokenResponsePath ?? "accessToken";
+  const fallbackEmail = auth.defaultEmail ?? "smoketest@example.com";
+  const fallbackPassword = auth.defaultPassword ?? "SmokeTest123!";
+  const bodyOption = auth.loginBodyFormat === "form"
+    ? `{ form: { ${ef}: EMAIL, ${pf}: PASSWORD } }  // form-urlencoded`
+    : `{ data: { ${ef}: EMAIL, ${pf}: PASSWORD } }  // JSON body`;
+
+  // Build token extraction (supports dot-notation like "data.accessToken")
+  const tokenExpr = tokenPath.split(".").reduce((acc, seg) => `${acc}.${seg}`, "body");
+
   return [
-    `Auth type: BEARER JWT`,
-    `Login endpoint: ${auth.loginEndpoint}`,
-    `Login body format: ${auth.loginBodyFormat === "form" ? "FORM — use Playwright 'form:' option" : "JSON — use Playwright 'data:' option"}`,
-    `  - EXACT login call to use:`,
-    `      const loginResp = await request.post(BASE_URL + '${auth.loginEndpoint.replace(/^POST\s+/, "")}', ${playwrightLoginOption})`,
-    `  - Extract token from response: body${auth.tokenResponsePath ? "." + auth.tokenResponsePath : ".accessToken"}`,
-    `  - Attach to subsequent requests: headers: { 'Authorization': 'Bearer <token>' }`,
-    auth.refreshEndpoint ? `  - Refresh endpoint: ${auth.refreshEndpoint}` : "",
-  ].filter(Boolean).join("\n");
+    `AUTH STRATEGY: BEARER INLINE`,
+    ``,
+    `ONE login at file scope in test.beforeAll — token shared across ALL tests in this file.`,
+    ``,
+    `Login endpoint : ${auth.loginEndpoint}`,
+    `Body format    : ${auth.loginBodyFormat === "form" ? "FORM (application/x-www-form-urlencoded)" : "JSON (application/json)"}`,
+    `Token path     : body.${tokenPath}`,
+    `Header         : ${auth.tokenHeaderName}: ${auth.tokenHeaderFormat}`,
+    ``,
+    `USE THIS EXACT PATTERN — copy precisely:`,
+    ``,
+    `import { test, expect, request as playwrightRequest } from '@playwright/test';`,
+    `import type { APIRequestContext } from '@playwright/test';`,
+    ``,
+    `const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';`,
+    `const EMAIL    = process.env.SMOKE_TEST_EMAIL    || '${fallbackEmail}';`,
+    `const PASSWORD = process.env.SMOKE_TEST_PASSWORD || '${fallbackPassword}';`,
+    ``,
+    `let ctx: APIRequestContext;`,
+    `let authToken: string;`,
+    ``,
+    `test.beforeAll(async () => {`,
+    `  ctx = await playwrightRequest.newContext();`,
+    `  const loginResp = await ctx.post(BASE_URL + '${loginPath}', ${bodyOption});`,
+    `  const body = await loginResp.json();`,
+    `  authToken = ${tokenExpr};`,
+    `});`,
+    ``,
+    `test.afterAll(async () => { await ctx.dispose(); });`,
+    ``,
+    `// In every test — use module-level ctx with Authorization header:`,
+    `test('GET /api/resource @smoke', async () => {`,
+    `  const response = await ctx.get(BASE_URL + '/api/resource', {`,
+    `    headers: { '${auth.tokenHeaderName}': \`${auth.tokenHeaderFormat.replace("{token}", "${authToken}")}\` },`,
+    `  });`,
+    `  expect(response.status()).toBe(200);`,
+    `});`,
+    ``,
+    `RULES:`,
+    `- ONE beforeAll per file — NEVER login inside individual test() bodies`,
+    `- Use module-level ctx for ALL API requests in this file`,
+    `- Always pass the ${auth.tokenHeaderName} header on every authenticated request`,
+    `- For UI pages using { page } fixture: fill and submit the login form instead of using ctx`,
+    auth.refreshEndpoint ? `- Refresh endpoint available: ${auth.refreshEndpoint}` : ``,
+    auth.defaultEmail ? `\nSEED CREDENTIALS (use as fallbacks in generated code):` : ``,
+    auth.defaultEmail ? `  Default email:    ${fallbackEmail}` : ``,
+    auth.defaultPassword ? `  Default password: ${fallbackPassword}` : ``,
+  ].filter(s => s !== undefined && s !== null).join("\n");
 }
 
 // ─── FK lookup helper ─────────────────────────────────────────────────────────
@@ -296,7 +299,7 @@ function buildPageDetail(page: ExtractedPage): string {
 // ─── Main message builder ─────────────────────────────────────────────────────
 
 export function buildPlaywrightUserMessage(chunk: BlueprintChunk, allEndpoints: ExtractedEndpoint[] = []): string {
-  const authNotes = buildAuthNotes(chunk.auth);
+  const authNotes = buildAuthNotes(chunk);
   const endpointDetails = chunk.endpoints
     .map(ep => buildEndpointDetail(ep, chunk.endpoints, allEndpoints))
     .join("\n\n");

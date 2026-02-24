@@ -284,8 +284,12 @@ function mergeComponentPagesIntoRouterPages(pages: ExtractedPage[]): ExtractedPa
   // Nothing to do if there are no router-defined pages
   if (routerPages.length === 0) return pages;
 
-  // Normalise a title for matching: "LoginPage" → "login", "Dashboard" → "dashboard"
-  const normalise = (s: string) => s.toLowerCase().replace(/page$/, "").replace(/[-_\s]/g, "");
+  
+  // Strips common component naming suffixes so component files map to their route.
+  const COMPONENT_SUFFIX_RE =
+    /(page|display|view|component|container|screen|section|panel|layout|wrapper|modal|list|detail|summary|card|table|tab|form|widget|sidebar|drawer|dialog|overlay)s?$/i;
+  const normalise = (s: string) =>
+    s.toLowerCase().replace(COMPONENT_SUFFIX_RE, "").replace(/[-_\s]/g, "");
 
   // Build lookup:  "login" → component page
   const byNormTitle = new Map<string, ExtractedPage>();
@@ -307,7 +311,19 @@ function mergeComponentPagesIntoRouterPages(pages: ExtractedPage[]): ExtractedPa
       ?.toLowerCase()
       .replace(/[-_\s]/g, "") ?? "";
 
-    const cp = byNormTitle.get(key);
+    // Exact match first
+    let cp = byNormTitle.get(key);
+
+    // Fallback: prefix match catches remaining suffixes not in COMPONENT_SUFF    // Guard with key.length >= 4 to avoid spurious matches on short keys ("app", "api").
+    if (!cp && key.length >= 4) {
+      for (const [normTitle, candidate] of byNormTitle) {
+        if (normTitle.startsWith(key) || key.startsWith(normTitle)) {
+          cp = candidate;
+          break;
+        }
+      }
+    }
+
     if (!cp) return rp;
 
     consumedIds.add(cp.id);

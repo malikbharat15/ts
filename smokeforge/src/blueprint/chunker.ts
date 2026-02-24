@@ -3,10 +3,24 @@ import type {
   ExtractedEndpoint,
   ExtractedPage,
   AuthConfig,
+  AuthType,
   TestDataHints,
 } from "./types";
 
 // ─── Public interface ─────────────────────────────────────────────────────────
+
+/**
+ * How this chunk should authenticate during test execution.
+ *
+ * - `storageState`   — browser-session auth (session_cookie, next_auth, OAuth/SSO, Clerk, etc.)
+ *                      A shared `auth.setup.ts` Playwright global-setup should be emitted once.
+ *                      Each spec file should declare `use: { storageState: './auth.state.json' }`.
+ * - `bearer_inline`  — stateless API-token auth (JWT, API key, basic_auth).
+ *                      Each spec file does a single `beforeAll` HTTP POST to the login endpoint
+ *                      and attaches the token to subsequent requests.  No shared setup file needed.
+ * - `none`           — the app has no authentication; all routes are publicly accessible.
+ */
+export type AuthStrategy = "storageState" | "bearer_inline" | "none";
 
 export interface BlueprintChunk {
   domain: string;
@@ -14,14 +28,82 @@ export interface BlueprintChunk {
   endpoints: ExtractedEndpoint[];
   pages: ExtractedPage[];
   auth: AuthConfig | null;
+  /** Resolved authentication strategy for this chunk — drives code generation. */
+  authStrategy: AuthStrategy;
   testDataHints: TestDataHints;
   outputFileName: string;
+}
+
+// ─── Auth setup info ──────────────────────────────────────────────────────────
+
+/**
+ * Metadata needed to generate a shared Playwright `auth.setup.ts` file.
+ * Present only when `authStrategy === "storageState"` for at least one chunk.
+ */
+export interface AuthSetupInfo {
+  /** The auth strategy that requires shared browser state. */
+  strategy: "storageState";
+  /** Auth config extracted from the blueprint. */
+  auth: AuthConfig;
+  /** Suggested output file name for the global auth setup. */
+  setupFileName: "auth.setup.ts";
+  /** Path to the state file that specs will reference. */
+  storageStateFile: "./auth.state.json";
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_ENDPOINTS_PER_CHUNK = 5; // Postman items with pre-request FK scripts are ~1800 chars each; 5×1800=9KB ≈ 2300 tokens, safely under 8192
 const MAX_PAGES_PER_CHUNK = 10;
+
+// ─── Auth strategy classification ────────────────────────────────────────────
+
+/**
+ * Auth types that require a real browser session (cookies / OAuth redirects).
+ * These cannot be obtained via a simple API call, so we emit a shared
+ * `auth.setup.ts` Playwright globalSetup and store the session in a file.
+ */
+const STORAGE_STATE_AUTH_TYPES = new Set<AuthType>([
+  "session_cookie",
+  "next_auth",
+  "oauth_sso",
+  "firebase",
+  "supabase",
+  "clerk",
+]);
+
+/**
+ * Classifies the auth config into an `AuthStrategy` value.
+ *
+ * @param auth - The auth config from the blueprint, or `null` for public apps.
+ * @returns The resolved strategy for test code generation.
+ */
+export function classifyAuthStrategy(auth: AuthConfig | null): AuthStrategy {
+  if (auth === null) return "none";
+  if (STORAGE_STATE_AUTH_TYPES.has(auth.tokenType)) return "storageState";
+  return "bearer_inline";
+}
+
+/**
+ * Returns the shared auth-setup metadata when the blueprint requires browser-session auth,
+ * or `null` when no shared setup file is needed (bearer_inline / no auth).
+ *
+ * Usage: call once per blueprint before emitting output files.
+ * If non-null, emit an `auth.setup.ts` Playwright global-setup file in addition to the spec files.
+ *
+ * @param blueprint - The fully-assembled test blueprint.
+ * @returns `AuthSetupInfo` when `storageState` is needed, otherwise `null`.
+ */
+export function getAuthSetupInfo(blueprint: TestBlueprint): AuthSetupInfo | null {
+  if (classifyAuthStrategy(blueprint.auth) !== "storageState") return null;
+  // auth is guaranteed non-null when strategy is storageState
+  return {
+    strategy: "storageState",
+    auth: blueprint.auth!,
+    setupFileName: "auth.setup.ts",
+    storageStateFile: "./auth.state.json",
+  };
+}
 
 // ─── Domain extraction ────────────────────────────────────────────────────────
 
@@ -171,6 +253,7 @@ function makeChunk(
     endpoints,
     pages,
     auth,
+    authStrategy: classifyAuthStrategy(auth),
     testDataHints,
     outputFileName,
   };
